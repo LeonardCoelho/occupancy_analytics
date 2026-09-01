@@ -4,38 +4,28 @@ import pandas as pd
 from config import PROCESSED_DIR
 
 
+# CAMINHOS
+
+arquivo_entrada = PROCESSED_DIR / 'df_ocupacao.parquet'
+arquivo_saida = PROCESSED_DIR / 'ocupacao_por_unidade.parquet'
+
+
 # LEITURA DOS DADOS
 
-df_ocupacao = pd.read_parquet(
-    PROCESSED_DIR / 'df_ocupacao.parquet'
-)
+df_ocupacao = pd.read_parquet(arquivo_entrada)
 
 
 # VALIDAÇÕES INICIAIS
 
 registros_iniciais = len(df_ocupacao)
 
-metro_padrao_nulo = (
-    df_ocupacao['m³ padrão']
-    .isna()
-    .sum()
-)
+metro_padrao_nulo = df_ocupacao['m³ padrão'].isna().sum()
+metro_padrao_zero = df_ocupacao['m³ padrão'].eq(0).sum()
+metro_padrao_negativo = df_ocupacao['m³ padrão'].lt(0).sum()
 
-metro_padrao_zero = (
-    df_ocupacao['m³ padrão']
-    .eq(0)
-    .sum()
-)
+print(f'Registros recebidos: {registros_iniciais:,}')
 
-metro_padrao_negativo = (
-    df_ocupacao['m³ padrão']
-    .lt(0)
-    .sum()
-)
-
-print(f'Registros iniciais: {registros_iniciais:,}')
-
-print('\nDistribuição de linhas por visão:')
+print('\nDistribuição por visão:')
 print(df_ocupacao['Visão'].value_counts(dropna=False))
 
 print(f'\nm³ padrão nulo: {metro_padrao_nulo:,}')
@@ -43,25 +33,17 @@ print(f'm³ padrão igual a zero: {metro_padrao_zero:,}')
 print(f'm³ padrão negativo: {metro_padrao_negativo:,}')
 
 
-# IDENTIFICAÇÃO DOS REGISTROS VÁLIDOS
+# OCUPAÇÃO POR LINHA
 
 condicao_valida = (
     df_ocupacao['m³ padrão'].notna()
     & df_ocupacao['m³ padrão'].gt(0)
 )
 
-linhas_validas = condicao_valida.sum()
-linhas_invalidas = (~condicao_valida).sum()
-
-print(f'\nLinhas válidas: {linhas_validas:,}')
-print(f'Linhas inválidas: {linhas_invalidas:,}')
-
-
-# CÁLCULO DA OCUPAÇÃO POR LINHA
-
 df_ocupacao['ocupacao_linha'] = np.where(
     condicao_valida,
-    df_ocupacao['m³ carregado'] / df_ocupacao['m³ padrão'],
+    df_ocupacao['m³ carregado']
+    / df_ocupacao['m³ padrão'],
     np.nan
 )
 
@@ -81,35 +63,36 @@ print(f'\nOcupações calculadas: {ocupacoes_calculadas:,}')
 print(f'Ocupações não calculadas: {ocupacoes_nao_calculadas:,}')
 print(f'Registros preservados: {len(df_ocupacao):,}')
 
-print('\nAmostra do cálculo por linha:')
 
-print(
-    df_ocupacao[
-        [
-            'm³ carregado',
-            'm³ padrão',
-            'ocupacao_linha'
-        ]
-    ].head()
-)
+# AGREGAÇÃO POR UNIDADE E VISÃO
 
-
-# AGREGAÇÃO POR CLIENTE E VISÃO
-
-df_cliente_visao = (
+df_unidade_visao = (
     df_ocupacao
     .groupby(
-        ['Cod cliente', 'Cliente', 'Visão'],
+        ['Cliente curto', 'Visão'],
         dropna=False
     )
     .agg(
-        metro_carregado=('m³ carregado', 'sum'),
+        metro_carregado=(
+            'm³ carregado',
+            'sum'
+        ),
         metro_padrao=(
             'm³ padrão',
             lambda coluna: coluna.sum(min_count=1)
         ),
-        qtd_ocs=('OC', 'nunique'),
-        frete_total=('R$ frete', 'sum'),
+        qtd_ocs=(
+            'OC',
+            'nunique'
+        ),
+        qtd_codigos_cliente=(
+            'Cod cliente',
+            'nunique'
+        ),
+        frete_total=(
+            'R$ frete',
+            'sum'
+        ),
         qtd_metro_padrao_nulo=(
             'm³ padrão',
             lambda coluna: coluna.isna().sum()
@@ -119,133 +102,49 @@ df_cliente_visao = (
 )
 
 print(
-    f'\nRegistros agregados por cliente e visão: '
-    f'{len(df_cliente_visao):,}'
+    f'\nRegistros agregados por unidade e visão: '
+    f'{len(df_unidade_visao):,}'
 )
 
 
-# CÁLCULO DA OCUPAÇÃO AGREGADA
+# OCUPAÇÃO AGREGADA POR UNIDADE E VISÃO
 
-condicao_agregada_valida = (
-    df_cliente_visao['metro_padrao'].notna()
-    & df_cliente_visao['metro_padrao'].gt(0)
+condicao_unidade_valida = (
+    df_unidade_visao['metro_padrao'].notna()
+    & df_unidade_visao['metro_padrao'].gt(0)
 )
 
-df_cliente_visao['ocupacao_cliente_visao'] = np.where(
-    condicao_agregada_valida,
-    df_cliente_visao['metro_carregado']
-    / df_cliente_visao['metro_padrao'],
+df_unidade_visao['ocupacao_unidade_visao'] = np.where(
+    condicao_unidade_valida,
+    df_unidade_visao['metro_carregado']
+    / df_unidade_visao['metro_padrao'],
     np.nan
 )
 
-ocupacoes_agregadas_nao_calculadas = (
-    df_cliente_visao['ocupacao_cliente_visao']
-    .isna()
-    .sum()
-)
 
-print(
-    f'Ocupações agregadas não calculadas: '
-    f'{ocupacoes_agregadas_nao_calculadas:,}'
-)
+# PIVOT AA X REAL
 
-
-# IDENTIFICAÇÃO DOS CLIENTES COM M³ PADRÃO NULO
-
-codigos_com_metro_nulo = (
-    df_ocupacao
-    .loc[df_ocupacao['m³ padrão'].isna()]
-    [['Cod cliente', 'Visão']]
-    .drop_duplicates()
-)
-
-print(
-    f'\nClientes e visões com m³ padrão nulo: '
-    f'{len(codigos_com_metro_nulo):,}'
-)
-
-print(codigos_com_metro_nulo)
-
-
-# DIAGNÓSTICO APÓS O AGRUPAMENTO
-
-diagnostico_nulos = codigos_com_metro_nulo.merge(
-    df_cliente_visao,
-    on=['Cod cliente', 'Visão'],
-    how='left',
-    validate='one_to_one'
-)
-
-print('\nSituação desses clientes após o agrupamento:')
-
-colunas_diagnostico = [
-    'Cod cliente',
-    'Cliente',
-    'Visão',
-    'metro_carregado',
-    'metro_padrao',
-    'qtd_ocs',
-    'qtd_metro_padrao_nulo',
-    'ocupacao_cliente_visao'
-]
-
-print(diagnostico_nulos[colunas_diagnostico])
-
-colunas_resultado = [
-    'Cod cliente',
-    'Cliente',
-    'Visão',
-    'metro_carregado',
-    'metro_padrao',
-    'ocupacao_cliente_visao',
-    'qtd_ocs',
-    'frete_total'
-]
-
-print('\nAmostra da ocupação agregada:')
-print(df_cliente_visao[colunas_resultado].head())
-
-cliente_teste = df_ocupacao[
-    df_ocupacao['Cod cliente'].eq(53053006)
-]
-
-validacao_manual = (
-    cliente_teste
-    .groupby('Visão')
-    .agg(
-        metro_carregado=('m³ carregado', 'sum'),
-        metro_padrao=('m³ padrão', 'sum'),
-        qtd_ocs=('OC', 'nunique')
+df_comparativo = (
+    df_unidade_visao
+    .pivot_table(
+        index='Cliente curto',
+        columns='Visão',
+        values=[
+            'frete_total',
+            'metro_carregado',
+            'metro_padrao',
+            'ocupacao_unidade_visao',
+            'qtd_codigos_cliente',
+            'qtd_metro_padrao_nulo',
+            'qtd_ocs'
+        ],
+        aggfunc='first'
     )
+    .reset_index()
 )
 
-validacao_manual['ocupacao'] = (
-    validacao_manual['metro_carregado']
-    / validacao_manual['metro_padrao']
-)
 
-print('\nValidação manual do cliente 53053006:')
-print(validacao_manual)
-
-df_comparativo = df_cliente_visao.pivot_table(
-    index=[
-        'Cod cliente',
-        'Cliente'
-    ],
-    columns='Visão',
-    values=[
-        'metro_carregado',
-        'metro_padrao',
-        'qtd_ocs',
-        'frete_total',
-        'ocupacao_cliente_visao'
-    ],
-    aggfunc='first'
-).reset_index()
-
-print('\nColunas após o pivot com todas as métricas:')
-print(df_comparativo.columns.tolist())
-# ACHATAMENTO DAS COLUNAS DO PIVOT
+# ACHATAMENTO DAS COLUNAS
 
 df_comparativo.columns = [
     coluna[0]
@@ -254,17 +153,26 @@ df_comparativo.columns = [
     for coluna in df_comparativo.columns
 ]
 
+
+# RENOMEAR OCUPAÇÕES
+
 df_comparativo = df_comparativo.rename(
     columns={
-        'ocupacao_cliente_visao_AA': 'ocupacao_AA',
-        'ocupacao_cliente_visao_Real': 'ocupacao_Real'
+        'ocupacao_unidade_visao_AA': 'ocupacao_AA',
+        'ocupacao_unidade_visao_Real': 'ocupacao_Real'
     }
 )
+
+
+# VARIAÇÃO EM PONTOS PERCENTUAIS
 
 df_comparativo['variacao_pp'] = (
     df_comparativo['ocupacao_Real']
     - df_comparativo['ocupacao_AA']
 )
+
+
+# STATUS DA COMPARAÇÃO
 
 tem_aa_e_real = (
     df_comparativo['ocupacao_AA'].notna()
@@ -295,50 +203,83 @@ df_comparativo['status_comparacao'] = np.select(
     default='Sem dados'
 )
 
-print('\nColunas após o achatamento:')
-print(df_comparativo.columns.tolist())
 
-print('\nDistribuição do status de comparação:')
+# ORDEM DAS COLUNAS
+
+colunas_finais = [
+    'Cliente curto',
+    'ocupacao_AA',
+    'ocupacao_Real',
+    'variacao_pp',
+    'metro_carregado_AA',
+    'metro_carregado_Real',
+    'metro_padrao_AA',
+    'metro_padrao_Real',
+    'qtd_ocs_AA',
+    'qtd_ocs_Real',
+    'qtd_codigos_cliente_AA',
+    'qtd_codigos_cliente_Real',
+    'frete_total_AA',
+    'frete_total_Real',
+    'qtd_metro_padrao_nulo_AA',
+    'qtd_metro_padrao_nulo_Real',
+    'status_comparacao'
+]
+
+df_comparativo = df_comparativo[colunas_finais]
+
+
+# ORDENAÇÃO PELO VOLUME REAL
+
+df_comparativo = (
+    df_comparativo
+    .sort_values(
+        by='metro_padrao_Real',
+        ascending=False,
+        na_position='last'
+    )
+    .reset_index(drop=True)
+)
+
+
+# VALIDAÇÕES FINAIS
+
+unidades_duplicadas = (
+    df_comparativo['Cliente curto']
+    .duplicated()
+    .sum()
+)
+
+print(
+    f'\nUnidades no comparativo final: '
+    f'{len(df_comparativo):,}'
+)
+
+print(
+    f'Clientes curtos duplicados: '
+    f'{unidades_duplicadas:,}'
+)
+
+print('\nDistribuição dos status:')
 
 print(
     df_comparativo['status_comparacao']
     .value_counts(dropna=False)
 )
 
-colunas_comparativo = [
-    'Cod cliente',
-    'Cliente',
-    'ocupacao_AA',
-    'ocupacao_Real',
-    'variacao_pp',
-    'metro_padrao_AA',
-    'metro_padrao_Real',
-    'qtd_ocs_AA',
-    'qtd_ocs_Real',
-    'frete_total_AA',
-    'frete_total_Real',
-    'status_comparacao'
+
+# VALIDAÇÃO DO ARROJITO
+
+teste_arrojito = df_comparativo.loc[
+    df_comparativo['Cliente curto']
+    .eq('ARROJITO - PINHAIS')
 ]
 
-print('\nAmostra do comparativo final:')
-print(df_comparativo[colunas_comparativo].head(10))
+print('\nValidação ARROJITO - PINHAIS:')
+print(teste_arrojito.to_string(index=False))
 
-# EXPORTAÇÃO DO RESULTADO TRANSFORMADO
 
-print(
-    f'\nClientes no comparativo final: '
-    f'{len(df_comparativo):,}'
-)
-
-print(
-    f'Códigos duplicados no comparativo: '
-    f'{df_comparativo["Cod cliente"].duplicated().sum():,}'
-)
-
-arquivo_saida = (
-    PROCESSED_DIR
-    / 'ocupacao_por_cliente.parquet'
-)
+# EXPORTAÇÃO
 
 df_comparativo.to_parquet(
     arquivo_saida,
@@ -346,6 +287,6 @@ df_comparativo.to_parquet(
 )
 
 print(
-    f'\nComparativo por cliente exportado para: '
+    f'\nComparativo por unidade exportado para: '
     f'{arquivo_saida}'
 )
