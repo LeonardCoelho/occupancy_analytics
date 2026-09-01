@@ -1,0 +1,22 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+
+# Dados corporativos
+data/raw/
+data/processed/
+outputs/
+
+# Arquivos de dados
+*.xlsx
+*.xls
+*.csv
+*.parquet
+
+# Arquivos locais
+.env
+.vscode/
