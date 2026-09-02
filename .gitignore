@@ -2,21 +2,29 @@
 .venv/
 venv/
 
-# Cache Python
+# Cache do Python
 __pycache__/
-*.pyc
+*.py[cod]
 
-# Dados corporativos
+# Dados
 data/raw/
 data/processed/
-outputs/
+data/output/
 
-# Arquivos de dados
+# Formatos de dados
 *.xlsx
 *.xls
 *.csv
 *.parquet
 
-# Arquivos locais
+# Variáveis de ambiente
 .env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Editores e sistema
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
