@@ -153,8 +153,9 @@ def preparar_visao_ocupacao(dataframe, coluna_agrupamento, volume_minimo=0.0):
 
 def criar_grafico_ocupacao(dataframe, categoria, titulo, meta, quantidade):
     dados = (
-        dataframe.nlargest(quantidade, 'metro_carregado')
-        .sort_values('metro_carregado', ascending=False)
+        dataframe
+        .nlargest(quantidade, 'metro_carregado')
+        .sort_values('metro_carregado', ascending=True)
         .reset_index(drop=True)
     )
 
@@ -173,91 +174,98 @@ def criar_grafico_ocupacao(dataframe, categoria, titulo, meta, quantidade):
         .map({True: '#2E86DE', False: '#D9534F'})
     )
 
-    dados['prioridade'] = (
-        dados['ocupacao']
-        .lt(meta)
-        .map({True: 'Priorizar analise', False: 'Dentro da meta'})
+    dados['texto_ocupacao'] = dados['ocupacao'].map(
+        lambda valor: f'{valor:.1%}'
     )
 
-    mediana_volume = dados['metro_carregado'].median()
+    dados['texto_volume'] = dados['metro_carregado'].map(
+        lambda valor: f'{formatar_numero(valor, 0)} m3'
+    )
 
     figura = go.Figure()
 
     figura.add_trace(
-        go.Scatter(
-            x=dados['metro_carregado'],
-            y=dados['ocupacao'],
-            mode='markers+text',
-            text=dados[categoria],
-            textposition='top center',
-            textfont={'size': 10},
+        go.Bar(
+            x=dados['ocupacao'],
+            y=dados[categoria],
+            orientation='h',
             marker={
-                'size': 16,
                 'color': dados['cor'],
-                'opacity': 0.85,
-                'line': {'color': '#FFFFFF', 'width': 1}
+                'line': {'color': '#FFFFFF', 'width': 0.8}
+            },
+            text=dados['texto_ocupacao'],
+            textposition='inside',
+            insidetextanchor='end',
+            textfont={
+                'size': 12,
+                'color': '#FFFFFF',
+                'family': 'Arial Black'
             },
             customdata=dados[
                 [
-                    categoria,
+                    'metro_carregado',
                     'metro_padrao',
                     'frete_total',
                     'qtd_unidades',
                     'qtd_codigos',
-                    'situacao',
-                    'prioridade'
+                    'situacao'
                 ]
             ].to_numpy(),
             hovertemplate=(
-                '<b>%{customdata[0]}</b><br>'
-                'm3 carregado: %{x:,.2f}<br>'
-                'Ocupacao: %{y:.2%}<br>'
+                '<b>%{y}</b><br>'
+                'Ocupacao: %{x:.2%}<br>'
+                'm3 carregado: %{customdata[0]:,.2f}<br>'
                 'm3 padrao: %{customdata[1]:,.2f}<br>'
                 'Frete total: R$ %{customdata[2]:,.2f}<br>'
                 'Unidades: %{customdata[3]}<br>'
                 'Codigos-filhos: %{customdata[4]}<br>'
-                'Situacao: %{customdata[5]}<br>'
-                '<b>%{customdata[6]}</b>'
+                'Situacao: %{customdata[5]}'
                 '<extra></extra>'
             ),
             showlegend=False
         )
     )
 
-    figura.add_hline(
-        y=meta,
+    figura.add_trace(
+        go.Scatter(
+            x=[1.025] * len(dados),
+            y=dados[categoria],
+            mode='text',
+            text=dados['texto_volume'],
+            textposition='middle right',
+            textfont={'size': 11, 'color': '#FFFFFF'},
+            hoverinfo='skip',
+            showlegend=False,
+            cliponaxis=False
+        )
+    )
+
+    figura.add_vline(
+        x=meta,
         line_dash='dash',
         line_color='#F1C40F',
         line_width=3,
         annotation_text=f'Meta: {meta:.2%}',
-        annotation_position='top right'
-    )
-
-    figura.add_vline(
-        x=mediana_volume,
-        line_dash='dot',
-        line_color='#95A5A6',
-        line_width=2,
-        annotation_text='Volume mediano',
         annotation_position='top'
     )
 
-    limite_superior = max(1.0, dados['ocupacao'].max() * 1.10)
+    altura = max(520, len(dados) * 42)
 
     figura.update_layout(
-        height=700,
-        margin={'l': 30, 'r': 30, 't': 80, 'b': 50},
+        height=altura,
+        margin={'l': 20, 'r': 150, 't': 70, 'b': 40},
         hovermode='closest',
+        bargap=0.22,
         xaxis={
-            'title': 'm3 carregado',
-            'rangemode': 'tozero',
-            'showgrid': True
-        },
-        yaxis={
             'title': 'Ocupacao',
             'tickformat': '.0%',
-            'range': [0, limite_superior],
-            'showgrid': True
+            'range': [0, 1.18],
+            'showgrid': True,
+            'zeroline': False
+        },
+        yaxis={
+            'title': titulo,
+            'automargin': True
         }
     )
 
@@ -348,19 +356,19 @@ df_mapa['ocupacao_percentual'] = df_mapa['ocupacao'] * 100
 df_mapa['situacao_meta'] = df_mapa['ocupacao'].ge(meta_ocupacao).map({True: 'Na meta', False: 'Abaixo da meta'})
 
 coordenadas_ufs = {
-    'AC': (-9.02, -70.81), 'AL': (-9.57, -36.78),
+    'AC': (-9.02, -70.81), 'AL': (-9.70, -34.80),
     'AP': (1.41, -51.77), 'AM': (-3.47, -65.10),
     'BA': (-12.96, -41.70), 'CE': (-5.20, -39.53),
-    'DF': (-15.79, -47.88), 'ES': (-19.19, -40.34),
+    'DF': (-15.75, -46.80), 'ES': (-19.20, -38.80),
     'GO': (-15.98, -49.86), 'MA': (-5.42, -45.44),
     'MT': (-12.64, -55.42), 'MS': (-20.51, -54.54),
     'MG': (-18.10, -44.38), 'PA': (-3.79, -52.48),
-    'PB': (-7.28, -36.72), 'PR': (-24.89, -51.55),
-    'PE': (-8.38, -37.86), 'PI': (-6.60, -42.28),
-    'RJ': (-22.25, -42.66), 'RN': (-5.81, -36.59),
+    'PB': (-7.10, -34.50), 'PR': (-24.89, -51.55),
+    'PE': (-8.15, -34.90), 'PI': (-6.60, -42.28),
+    'RJ': (-22.40, -40.50), 'RN': (-5.70, -34.60),
     'RS': (-30.17, -53.50), 'RO': (-10.83, -63.34),
     'RR': (2.73, -61.33), 'SC': (-27.45, -50.95),
-    'SP': (-22.19, -48.79), 'SE': (-10.57, -37.45),
+    'SP': (-22.19, -48.79), 'SE': (-10.80, -35.30),
     'TO': (-10.25, -48.25)
 }
 
@@ -373,11 +381,7 @@ df_mapa['longitude'] = df_mapa['uf'].map(
     lambda uf: coordenadas_ufs.get(uf, (None, None))[1]
 )
 df_mapa['texto_mapa'] = df_mapa.apply(
-    lambda linha: (
-        f"{linha['uf']} {linha['ocupacao_percentual']:.0f}%"
-        if linha['uf'] in ufs_pequenas
-        else f"{linha['uf']}<br>{linha['ocupacao_percentual']:.1f}%"
-    ),
+    lambda linha: f"{linha['uf']} {linha['ocupacao_percentual']:.0f}%",
     axis=1
 )
 
@@ -406,7 +410,7 @@ try:
             text=df_mapa['texto_mapa'],
             mode='text',
             textfont={
-                'size': 10,
+                'size': 9,
                 'color': '#FFFFFF',
                 'family': 'Arial Black'
             },
@@ -495,11 +499,11 @@ with st.expander('Como e calculada a ocupacao?'):
     st.code('Ocupacao = soma do m3 carregado / soma do m3 padrao')
 
 st.divider()
-st.subheader('Priorizacao de clientes por volume e ocupacao')
+st.subheader('Ocupacao dos clientes com maior volume carregado')
 st.caption(
-    'Quanto mais a direita, maior o volume carregado. Pontos abaixo da linha '
-    'amarela estao abaixo da meta. Pontos vermelhos no canto inferior direito '
-    'representam as maiores oportunidades de melhoria.'
+    'Clientes ordenados pelo maior volume carregado. O percentual aparece dentro '
+    'da barra e o volume e exibido a direita. Vermelho indica resultado abaixo '
+    'da meta; azul indica resultado na meta ou acima.'
 )
 col_top, col_volume = st.columns(2)
 quantidade = col_top.slider('Quantidade de clientes-pai', 5, 50, 20, 5)
