@@ -458,6 +458,398 @@ def criar_heatmap_geografia_perfil(
     return figura
 
 
+def calcular_resumo_visao(dataframe, visao):
+    base = dataframe.loc[dataframe['visao'].eq(visao)].copy()
+    metro_carregado = base['metro_carregado'].sum()
+    metro_padrao = base['metro_padrao'].sum()
+    ocupacao = (
+        metro_carregado / metro_padrao
+        if metro_padrao > 0
+        else None
+    )
+
+    return {
+        'metro_carregado': metro_carregado,
+        'metro_padrao': metro_padrao,
+        'ocupacao': ocupacao,
+        'frete_total': base['frete_total'].sum(),
+        'registros': len(base)
+    }
+
+
+def preparar_comparativo_grupo(dataframe, coluna_grupo):
+    agrupado = (
+        dataframe
+        .groupby([coluna_grupo, 'visao'], dropna=False)
+        .agg(
+            metro_carregado=('metro_carregado', 'sum'),
+            metro_padrao=('metro_padrao', 'sum'),
+            frete_total=('frete_total', 'sum')
+        )
+        .reset_index()
+    )
+
+    agrupado = agrupado.loc[agrupado['metro_padrao'].gt(0)].copy()
+    agrupado['ocupacao'] = (
+        agrupado['metro_carregado'] / agrupado['metro_padrao']
+    )
+
+    comparativo = agrupado.pivot(
+        index=coluna_grupo,
+        columns='visao',
+        values=['metro_carregado', 'metro_padrao', 'frete_total', 'ocupacao']
+    )
+
+    comparativo.columns = [
+        f'{metrica}_{str(visao).lower()}'
+        for metrica, visao in comparativo.columns
+    ]
+    comparativo = comparativo.reset_index()
+
+    colunas_esperadas = [
+        'metro_carregado_real', 'metro_carregado_aa',
+        'metro_padrao_real', 'metro_padrao_aa',
+        'frete_total_real', 'frete_total_aa',
+        'ocupacao_real', 'ocupacao_aa'
+    ]
+    for coluna in colunas_esperadas:
+        if coluna not in comparativo.columns:
+            comparativo[coluna] = pd.NA
+
+    comparativo['variacao_ocupacao_pp'] = (
+        comparativo['ocupacao_real'] - comparativo['ocupacao_aa']
+    )
+    comparativo['variacao_volume_pct'] = (
+        comparativo['metro_carregado_real']
+        / comparativo['metro_carregado_aa']
+        - 1
+    )
+
+    return comparativo
+
+
+def criar_grafico_clientes_gerencial(dataframe, meta, quantidade):
+    dados = preparar_comparativo_grupo(dataframe, 'cliente_pai')
+    dados = dados.loc[
+        dados['metro_carregado_real'].notna()
+        & dados['ocupacao_real'].notna()
+    ].copy()
+
+    if dados.empty:
+        return None
+
+    dados['abaixo_meta'] = dados['ocupacao_real'].lt(meta)
+    dados = (
+        dados
+        .sort_values(
+            ['abaixo_meta', 'metro_carregado_real'],
+            ascending=[False, False]
+        )
+        .head(quantidade)
+        .sort_values('metro_carregado_real', ascending=True)
+        .reset_index(drop=True)
+    )
+
+    maior_volume = dados['metro_carregado_real'].max()
+    dados['volume_relativo'] = (
+        dados['metro_carregado_real'] / maior_volume
+        if maior_volume > 0
+        else 0
+    )
+    dados['cor_ocupacao'] = dados['ocupacao_real'].ge(meta).map({
+        True: '#27AE60',
+        False: '#D9534F'
+    })
+    dados['texto_volume'] = dados['metro_carregado_real'].map(
+        lambda valor: f'{formatar_numero(valor, 0)} m3'
+    )
+    dados['texto_ocupacao'] = dados['ocupacao_real'].map(
+        lambda valor: f'{valor:.1%}'
+    )
+
+    # Metade esquerda: volume parte da borda e avanca para o centro.
+    inicio_volume = -1.0
+    comprimento_volume = dados['volume_relativo']
+
+    # Metade direita: ocupacao parte da borda direita e volta para o centro.
+    inicio_ocupacao = 1.0 - dados['ocupacao_real']
+    comprimento_ocupacao = dados['ocupacao_real']
+
+    figura = go.Figure()
+
+    figura.add_trace(go.Bar(
+        x=comprimento_volume,
+        base=[inicio_volume] * len(dados),
+        y=dados['cliente_pai'],
+        orientation='h',
+        name='Volume relativo',
+        marker_color='#7F8C8D',
+        text=dados['texto_volume'],
+        textposition='inside',
+        insidetextanchor='start',
+        textfont={'color': '#FFFFFF', 'size': 11},
+        customdata=dados[
+            ['metro_carregado_real', 'metro_carregado_aa']
+        ].to_numpy(),
+        hovertemplate=(
+            '<b>%{y}</b><br>'
+            'm3 carregado Real: %{customdata[0]:,.2f}<br>'
+            'm3 carregado AA: %{customdata[1]:,.2f}<br>'
+            'Volume relativo: %{x:.1%} do maior cliente'
+            '<extra></extra>'
+        )
+    ))
+
+    figura.add_trace(go.Bar(
+        x=comprimento_ocupacao,
+        base=inicio_ocupacao,
+        y=dados['cliente_pai'],
+        orientation='h',
+        name='Ocupacao Real',
+        marker_color=dados['cor_ocupacao'],
+        text=dados['texto_ocupacao'],
+        textposition='inside',
+        insidetextanchor='start',
+        textfont={'color': '#FFFFFF', 'size': 11},
+        customdata=dados[
+            ['ocupacao_aa', 'variacao_ocupacao_pp', 'metro_carregado_real']
+        ].to_numpy(),
+        hovertemplate=(
+            '<b>%{y}</b><br>'
+            'Ocupacao Real: %{x:.2%}<br>'
+            'Ocupacao AA: %{customdata[0]:.2%}<br>'
+            'Real x AA: %{customdata[1]:+.2%}<br>'
+            'm3 carregado Real: %{customdata[2]:,.2f}'
+            '<extra></extra>'
+        )
+    ))
+
+    # A meta na metade direita e convertida para a posicao da ponta interna.
+    posicao_meta = 1.0 - meta
+    figura.add_vline(
+        x=posicao_meta,
+        line_dash='dash',
+        line_color='#F1C40F',
+        line_width=3,
+        annotation_text=f'Meta: {meta:.2%}',
+        annotation_position='top right'
+    )
+
+    figura.add_vline(
+        x=0,
+        line_color='rgba(255,255,255,0.35)',
+        line_width=1
+    )
+
+    figura.update_layout(
+        barmode='overlay',
+        height=max(560, len(dados) * 46),
+        margin={'l': 20, 'r': 30, 't': 85, 'b': 55},
+        bargap=0.30,
+        legend={
+            'orientation': 'h',
+            'yanchor': 'bottom',
+            'y': 1.06,
+            'xanchor': 'left',
+            'x': 0
+        },
+        xaxis={
+            'title': 'Volume relativo  →                 ←  Ocupacao Real',
+            'range': [-1.02, 1.02],
+            'tickvals': [-1, -0.5, 0, 0.5, 1],
+            'ticktext': ['Inicio volume', '50%', 'Centro', '50%', 'Inicio ocupacao'],
+            'showgrid': True,
+            'zeroline': False
+        },
+        yaxis={'title': 'Cliente-pai', 'automargin': True},
+        hovermode='closest'
+    )
+
+    return figura
+
+
+def criar_grafico_gap_meta(dataframe, meta, quantidade=10):
+    dados = preparar_comparativo_grupo(dataframe, 'cliente_pai')
+    dados = dados.loc[
+        dados['metro_carregado_real'].notna()
+        & dados['metro_padrao_real'].notna()
+        & dados['ocupacao_real'].notna()
+    ].copy()
+
+    dados['gap_meta_m3'] = (
+        meta * dados['metro_padrao_real']
+        - dados['metro_carregado_real']
+    ).clip(lower=0)
+    dados = (
+        dados.loc[dados['gap_meta_m3'].gt(0)]
+        .nlargest(quantidade, 'gap_meta_m3')
+        .sort_values('gap_meta_m3', ascending=True)
+        .reset_index(drop=True)
+    )
+
+    if dados.empty:
+        return None
+
+    dados['texto_gap'] = dados['gap_meta_m3'].map(
+        lambda valor: f'{formatar_numero(valor, 0)} m3'
+    )
+
+    figura = go.Figure(go.Bar(
+        x=dados['gap_meta_m3'],
+        y=dados['cliente_pai'],
+        orientation='h',
+        marker_color='#E67E22',
+        text=dados['texto_gap'],
+        textposition='outside',
+        cliponaxis=False,
+        customdata=dados[
+            [
+                'ocupacao_real', 'ocupacao_aa',
+                'metro_carregado_real', 'metro_padrao_real'
+            ]
+        ].to_numpy(),
+        hovertemplate=(
+            '<b>%{y}</b><br>'
+            'Gap para a meta: %{x:,.2f} m3<br>'
+            'Ocupacao Real: %{customdata[0]:.2%}<br>'
+            'Ocupacao AA: %{customdata[1]:.2%}<br>'
+            'm3 carregado Real: %{customdata[2]:,.2f}<br>'
+            'm3 padrao Real: %{customdata[3]:,.2f}'
+            '<extra></extra>'
+        )
+    ))
+
+    figura.update_layout(
+        height=max(480, len(dados) * 44),
+        margin={'l': 20, 'r': 120, 't': 30, 'b': 50},
+        xaxis={
+            'title': 'm3 adicionais estimados para atingir a meta',
+            'rangemode': 'tozero',
+            'showgrid': True
+        },
+        yaxis={'title': 'Cliente-pai', 'automargin': True},
+        showlegend=False
+    )
+
+    return figura
+
+
+def criar_heatmap_uf_perfil_gerencial(dataframe, meta):
+    base = dataframe.loc[
+        dataframe['uf'].notna()
+        & dataframe['perfil_veiculo'].notna()
+    ].copy()
+
+    if base.empty:
+        return None
+
+    agrupado = (
+        base
+        .groupby(['uf', 'perfil_veiculo', 'visao'], dropna=False)
+        .agg(
+            metro_carregado=('metro_carregado', 'sum'),
+            metro_padrao=('metro_padrao', 'sum')
+        )
+        .reset_index()
+    )
+    agrupado = agrupado.loc[agrupado['metro_padrao'].gt(0)].copy()
+    agrupado['ocupacao'] = (
+        agrupado['metro_carregado'] / agrupado['metro_padrao']
+    )
+
+    real = agrupado.loc[agrupado['visao'].eq('Real')].copy()
+    aa = agrupado.loc[agrupado['visao'].eq('AA')].copy()
+    aa = aa.rename(columns={
+        'ocupacao': 'ocupacao_aa',
+        'metro_carregado': 'metro_carregado_aa'
+    })[['uf', 'perfil_veiculo', 'ocupacao_aa', 'metro_carregado_aa']]
+
+    combinado = real.merge(
+        aa,
+        on=['uf', 'perfil_veiculo'],
+        how='left'
+    )
+
+    ordem_ufs = (
+        combinado.groupby('uf')['metro_carregado']
+        .sum().sort_values(ascending=False).index.tolist()
+    )
+    ordem_perfis = (
+        combinado.groupby('perfil_veiculo')['metro_carregado']
+        .sum().sort_values(ascending=False).index.tolist()
+    )
+
+    matriz_real = combinado.pivot(
+        index='uf', columns='perfil_veiculo', values='ocupacao'
+    ).reindex(index=ordem_ufs, columns=ordem_perfis)
+    matriz_aa = combinado.pivot(
+        index='uf', columns='perfil_veiculo', values='ocupacao_aa'
+    ).reindex(index=ordem_ufs, columns=ordem_perfis)
+    matriz_volume = combinado.pivot(
+        index='uf', columns='perfil_veiculo', values='metro_carregado'
+    ).reindex(index=ordem_ufs, columns=ordem_perfis)
+
+    textos = []
+    dados_hover = []
+    for uf in ordem_ufs:
+        linha_textos = []
+        linha_hover = []
+        for perfil in ordem_perfis:
+            real_valor = matriz_real.loc[uf, perfil]
+            aa_valor = matriz_aa.loc[uf, perfil]
+            volume = matriz_volume.loc[uf, perfil]
+            if pd.isna(real_valor):
+                linha_textos.append('')
+                linha_hover.append([None, None])
+            else:
+                seta = ''
+                if pd.notna(aa_valor):
+                    seta = '▲' if real_valor >= aa_valor else '▼'
+                linha_textos.append(f'{real_valor:.0%} {seta}')
+                linha_hover.append([aa_valor, volume])
+        textos.append(linha_textos)
+        dados_hover.append(linha_hover)
+
+    escala = [
+        [0.0, '#D9534F'],
+        [meta, '#D9534F'],
+        [meta, '#27AE60'],
+        [1.0, '#27AE60']
+    ]
+
+    figura = go.Figure(go.Heatmap(
+        z=matriz_real.values,
+        x=ordem_perfis,
+        y=ordem_ufs,
+        zmin=0,
+        zmax=1,
+        colorscale=escala,
+        text=textos,
+        texttemplate='%{text}',
+        textfont={'size': 10, 'color': '#FFFFFF'},
+        customdata=dados_hover,
+        hovertemplate=(
+            '<b>UF: %{y}</b><br>'
+            'Perfil: %{x}<br>'
+            'Ocupacao Real: %{z:.2%}<br>'
+            'Ocupacao AA: %{customdata[0]:.2%}<br>'
+            'm3 carregado Real: %{customdata[1]:,.2f}'
+            '<extra></extra>'
+        ),
+        colorbar={'title': 'Ocupacao', 'tickformat': '.0%'},
+        xgap=2,
+        ygap=2
+    ))
+
+    figura.update_layout(
+        height=max(520, len(ordem_ufs) * 38),
+        margin={'l': 20, 'r': 30, 't': 30, 'b': 140},
+        xaxis={'title': 'Perfil de veiculo', 'tickangle': -45},
+        yaxis={'title': 'UF', 'autorange': 'reversed'}
+    )
+    return figura
+
+
 if not ARQUIVO_ANALITICO.exists():
     st.error(f'Arquivo nao encontrado: {ARQUIVO_ANALITICO}')
     st.info('Execute python src/extract.py e python src/transform.py.')
@@ -476,10 +868,7 @@ st.caption('Painel interativo por cliente-pai, unidade e codigo-filho.')
 
 st.sidebar.header('Filtros principais')
 
-visoes = valores_disponiveis(df, 'visao')
-visoes_selecionadas = st.sidebar.multiselect(
-    'Visao:', visoes, default=['Real'] if 'Real' in visoes else visoes
-)
+st.sidebar.caption('Comparacao automatica: Real x AA')
 
 meses = (
     df[['mes_numero', 'mes_nome']].drop_duplicates().dropna()
@@ -498,15 +887,15 @@ meta_ocupacao = st.sidebar.number_input(
     value=67.31, step=0.01
 ) / 100
 
-if not visoes_selecionadas or not meses_selecionados or not cds_selecionados:
-    st.warning('Selecione ao menos uma visao, um mes e um CD.')
+if not meses_selecionados or not cds_selecionados:
+    st.warning('Selecione ao menos um mes e um CD.')
     st.stop()
 
 
 df_filtrado = df.loc[
-    df['visao'].isin(visoes_selecionadas)
-    & df['mes_numero'].isin(numeros_meses)
+    df['mes_numero'].isin(numeros_meses)
     & df['cd_origem'].isin(cds_selecionados)
+    & df['visao'].isin(['Real', 'AA'])
 ].copy()
 
 st.sidebar.divider()
@@ -537,7 +926,10 @@ st.divider()
 st.subheader('Ocupacao por estado')
 st.caption('Clique em um estado para filtrar o restante do painel.')
 
-df_mapa = preparar_visao_ocupacao(df_antes_uf, 'uf')
+df_mapa = preparar_visao_ocupacao(
+    df_antes_uf.loc[df_antes_uf['visao'].eq('Real')].copy(),
+    'uf'
+)
 df_mapa['ocupacao_percentual'] = df_mapa['ocupacao'] * 100
 df_mapa['situacao_meta'] = df_mapa['ocupacao'].ge(meta_ocupacao).map({True: 'Na meta', False: 'Abaixo da meta'})
 
@@ -664,246 +1056,207 @@ if df_filtrado.empty:
     st.warning('Nenhum registro encontrado com os filtros aplicados.')
     st.stop()
 
-metro_carregado = df_filtrado['metro_carregado'].sum()
-metro_padrao = df_filtrado['metro_padrao'].sum()
-frete_total = df_filtrado['frete_total'].sum()
-ocupacao = metro_carregado / metro_padrao if metro_padrao > 0 else None
+df_real = df_filtrado.loc[df_filtrado['visao'].eq('Real')].copy()
+df_aa = df_filtrado.loc[df_filtrado['visao'].eq('AA')].copy()
 
-st.subheader('Indicadores do periodo filtrado')
-c1, c2, c3 = st.columns(3)
-c4, c5, c6 = st.columns(3)
-c1.metric('Ocupacao', f'{ocupacao:.2%}' if ocupacao is not None else 'N/A')
-c2.metric('m3 carregados', formatar_numero(metro_carregado))
-c3.metric('m3 padrao', formatar_numero(metro_padrao))
-c4.metric('Frete total', f'R$ {formatar_numero(frete_total)}')
-c5.metric('Unidades distintas', formatar_inteiro(df_filtrado['cliente_unidade'].nunique()))
-c6.metric('Codigos de cliente', formatar_inteiro(df_filtrado['cod_cliente'].nunique()))
+if df_real.empty:
+    st.warning('Nao existem registros da visao Real para os filtros atuais.')
+    st.stop()
 
-st.caption(f'{formatar_inteiro(len(df_filtrado))} registros analiticos no filtro atual.')
+resumo_real = calcular_resumo_visao(df_filtrado, 'Real')
+resumo_aa = calcular_resumo_visao(df_filtrado, 'AA')
 
-with st.expander('Como e calculada a ocupacao?'):
-    st.code('Ocupacao = soma do m3 carregado / soma do m3 padrao')
+ocupacao_real = resumo_real['ocupacao']
+ocupacao_aa = resumo_aa['ocupacao']
+variacao_ocupacao_pp = (
+    ocupacao_real - ocupacao_aa
+    if ocupacao_real is not None and ocupacao_aa is not None
+    else None
+)
+variacao_volume_total = (
+    resumo_real['metro_carregado'] / resumo_aa['metro_carregado'] - 1
+    if resumo_aa['metro_carregado'] > 0
+    else None
+)
 
+st.subheader('Resumo executivo')
+st.caption(
+    'Comparacao do Real com a meta configurada e com o mesmo periodo da visao AA.'
+)
 
-# ANALISE GEOGRAFICA POR PERFIL DE VEICULO
+c1, c2, c3, c4 = st.columns(4)
+c1.metric(
+    'Ocupacao Real',
+    f'{ocupacao_real:.2%}' if ocupacao_real is not None else 'N/A',
+    delta=(
+        f'{ocupacao_real - meta_ocupacao:+.2%} vs. meta'
+        if ocupacao_real is not None else None
+    )
+)
+c2.metric('Meta configurada', f'{meta_ocupacao:.2%}')
+c3.metric(
+    'Ocupacao AA',
+    f'{ocupacao_aa:.2%}' if ocupacao_aa is not None else 'N/A',
+    delta=(
+        f'{variacao_ocupacao_pp:+.2%} Real x AA'
+        if variacao_ocupacao_pp is not None else None
+    )
+)
+c4.metric(
+    'm3 carregado Real',
+    formatar_numero(resumo_real['metro_carregado']),
+    delta=(
+        f'{variacao_volume_total:+.1%} vs. AA'
+        if variacao_volume_total is not None else None
+    )
+)
+
+st.caption(
+    f"{formatar_inteiro(resumo_real['registros'])} registros Real e "
+    f"{formatar_inteiro(resumo_aa['registros'])} registros AA no filtro atual."
+)
 
 st.divider()
-st.subheader('Analise geografica por perfil de veiculo')
+st.subheader('Volume e ocupacao por tipo de carregamento')
 st.caption(
-    'Escolha o nivel geografico para identificar localidades de maior volume '
-    'e comparar a ocupacao dos perfis de veiculo. A ocupacao sempre considera '
-    'a soma do m3 carregado dividida pela soma do m3 padrao.'
+    'Mostra se Paletizado e Estivado cresceram ou cairam no Real em relacao ao AA.'
 )
 
-niveis_geograficos = {
-    'Regiao': 'regiao',
-    'UF': 'uf',
-    'Cidade': 'cidade'
-}
-
-if 'mesorregiao' in df_filtrado.columns:
-    niveis_geograficos = {
-        'Regiao': 'regiao',
-        'Mesorregiao': 'mesorregiao',
-        'UF': 'uf',
-        'Cidade': 'cidade'
-    }
-
-col_nivel, col_quantidade_geo, col_volume_geo = st.columns(3)
-
-nivel_selecionado = col_nivel.selectbox(
-    'Nivel geografico:',
-    options=list(niveis_geograficos.keys()),
-    index=0,
-    key='nivel_geografico'
+comparativo_tipo = preparar_comparativo_grupo(
+    df_filtrado,
+    'tipo_carregamento'
 )
 
-quantidade_localidades = col_quantidade_geo.slider(
-    'Quantidade de localidades:',
+for tipo in ['Paletizado', 'Estivado']:
+    linha = comparativo_tipo.loc[
+        comparativo_tipo['tipo_carregamento'].eq(tipo)
+    ]
+
+    if linha.empty:
+        st.info(f'Sem dados para {tipo} nos filtros atuais.')
+        continue
+
+    registro = linha.iloc[0]
+    volume_real = registro['metro_carregado_real']
+    volume_aa = registro['metro_carregado_aa']
+    ocup_tipo_real = registro['ocupacao_real']
+    var_volume = registro['variacao_volume_pct']
+    var_ocup = registro['variacao_ocupacao_pp']
+
+    st.markdown(f'### {tipo}')
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric('Volume Real', formatar_numero(volume_real))
+    t2.metric(
+        'Volume AA',
+        formatar_numero(volume_aa) if pd.notna(volume_aa) else 'N/A'
+    )
+    t3.metric(
+        'Variacao do volume',
+        f'{var_volume:+.1%}' if pd.notna(var_volume) else 'N/A',
+        delta=(
+            f'{formatar_numero(volume_real - volume_aa)} m3'
+            if pd.notna(volume_aa) else None
+        )
+    )
+    t4.metric(
+        'Ocupacao Real',
+        f'{ocup_tipo_real:.2%}' if pd.notna(ocup_tipo_real) else 'N/A',
+        delta=(
+            f'{var_ocup:+.2%} vs. AA'
+            if pd.notna(var_ocup) else None
+        )
+    )
+
+st.divider()
+st.subheader('Clientes prioritarios para atuacao')
+st.caption(
+    'As barras partem das extremidades e avancam em direcao ao centro. A barra '
+    'cinza mostra o volume relativo ao maior cliente do ranking; a barra colorida '
+    'mostra a ocupacao Real. Alto volume e baixa ocupacao deixam maior distancia '
+    'entre as barras e indicam prioridade. A comparacao com AA fica no hover.'
+)
+
+quantidade_clientes = st.slider(
+    'Quantidade de clientes:',
     min_value=5,
     max_value=30,
     value=15,
-    step=5,
-    key='quantidade_localidades'
+    step=5
 )
 
-volume_minimo_geografia = col_volume_geo.number_input(
-    'Volume minimo da localidade (m3):',
-    min_value=0.0,
-    value=0.0,
-    step=100.0,
-    key='volume_minimo_geografia'
-)
-
-coluna_geografica = niveis_geograficos[nivel_selecionado]
-
-base_geografica = df_filtrado.loc[
-    df_filtrado[coluna_geografica].notna()
-].copy()
-
-visao_geografica = preparar_visao_ocupacao(
-    base_geografica,
-    coluna_geografica,
-    volume_minimo_geografia
-)
-
-figura_geografica = criar_grafico_ocupacao(
-    visao_geografica,
-    coluna_geografica,
-    nivel_selecionado,
+figura_clientes = criar_grafico_clientes_gerencial(
+    df_filtrado,
     meta_ocupacao,
-    quantidade_localidades
+    quantidade_clientes
 )
 
-st.markdown(
-    f'### Ocupacao por {nivel_selecionado.lower()}'
-)
-
-if figura_geografica is None:
-    st.warning(
-        'Nenhuma localidade encontrada para os filtros atuais.'
-    )
+if figura_clientes is None:
+    st.warning('Nenhum cliente encontrado para os filtros atuais.')
 else:
     st.plotly_chart(
-        figura_geografica,
+        figura_clientes,
         width='stretch',
-        key='grafico_geografico'
+        key='clientes_gerencial'
     )
 
-localidades_top = (
-    visao_geografica
-    .nlargest(quantidade_localidades, 'metro_carregado')
-    [coluna_geografica]
-    .dropna()
-    .tolist()
-)
-
-st.markdown(
-    f'### {nivel_selecionado} x perfil de veiculo'
-)
+st.divider()
+st.subheader('Ocupacao por estado e perfil de veiculo')
 st.caption(
-    'Cada celula mostra a ocupacao ponderada da combinacao entre localidade '
-    'e perfil de veiculo. Vermelho indica abaixo da meta; azul indica na meta '
-    'ou acima. Celulas vazias nao possuem movimento no filtro atual.'
+    'Cada celula mostra a ocupacao Real. Verde indica na meta ou acima; vermelho '
+    'indica abaixo da meta. A seta mostra se o Real melhorou ou piorou contra AA.'
 )
 
-figura_heatmap = criar_heatmap_geografia_perfil(
-    base_geografica,
-    coluna_geografica,
-    localidades_top,
+figura_uf_perfil = criar_heatmap_uf_perfil_gerencial(
+    df_filtrado,
     meta_ocupacao
 )
 
-if figura_heatmap is None:
-    st.warning(
-        'Nao existem combinacoes de localidade e perfil de veiculo '
-        'para os filtros atuais.'
-    )
+if figura_uf_perfil is None:
+    st.warning('Sem dados de UF e perfil para os filtros atuais.')
 else:
     st.plotly_chart(
-        figura_heatmap,
+        figura_uf_perfil,
         width='stretch',
-        key='heatmap_geografia_perfil'
+        key='uf_perfil_gerencial'
     )
 
 st.divider()
-st.subheader('Ocupacao dos clientes com maior volume carregado')
+st.subheader('Maiores oportunidades para atingir a meta')
 st.caption(
-    'Clientes ordenados pelo maior volume carregado. O percentual aparece dentro '
-    'da barra e o volume e exibido a direita. Vermelho indica resultado abaixo '
-    'da meta; azul indica resultado na meta ou acima.'
+    'Ranking estimado de quantos m3 adicionais seriam necessarios para cada '
+    'cliente atingir a meta configurada, considerando o m3 padrao do Real.'
 )
-col_top, col_volume = st.columns(2)
-quantidade = col_top.slider('Quantidade de clientes-pai', 5, 50, 20, 5)
-volume_minimo = col_volume.number_input('Volume minimo carregado (m3)', min_value=0.0, value=0.0, step=100.0)
 
-df_clientes_pai = preparar_visao_ocupacao(df_filtrado, 'cliente_pai', volume_minimo)
-figura = criar_grafico_ocupacao(df_clientes_pai, 'cliente_pai', 'Cliente-pai', meta_ocupacao, quantidade)
-if figura is not None:
-    st.plotly_chart(figura, width='stretch')
-
-abaixo = (
-    df_clientes_pai.loc[df_clientes_pai['ocupacao'].lt(meta_ocupacao)]
-    .sort_values('metro_carregado', ascending=False).head(20).copy()
+figura_gap = criar_grafico_gap_meta(
+    df_filtrado,
+    meta_ocupacao,
+    quantidade=10
 )
-st.subheader('Clientes-pai com maior volume abaixo da meta')
-if abaixo.empty:
-    st.success('Nenhum cliente-pai ficou abaixo da meta.')
+
+if figura_gap is None:
+    st.success('Nenhum cliente com gap positivo para a meta nos filtros atuais.')
 else:
-    abaixo['ocupacao_percentual'] = abaixo['ocupacao'] * 100
-    tabela_pais = abaixo[[
-        'cliente_pai', 'metro_carregado', 'metro_padrao',
-        'ocupacao_percentual', 'frete_total', 'qtd_unidades', 'qtd_codigos'
-    ]].rename(columns={
-        'cliente_pai': 'Cliente-pai', 'metro_carregado': 'm3 carregado',
-        'metro_padrao': 'm3 padrao', 'ocupacao_percentual': 'Ocupacao (%)',
-        'frete_total': 'Frete total', 'qtd_unidades': 'Unidades',
-        'qtd_codigos': 'Codigos-filhos'
-    })
-    st.dataframe(tabela_pais, width='stretch', hide_index=True)
+    st.plotly_chart(
+        figura_gap,
+        width='stretch',
+        key='gap_meta_clientes'
+    )
 
 st.divider()
-st.subheader('Detalhamento do cliente-pai')
-opcoes_pai = df_clientes_pai.sort_values('metro_carregado', ascending=False)['cliente_pai'].dropna().tolist()
-cliente_pai = st.selectbox(
-    'Selecione um cliente-pai para abrir as unidades:',
-    opcoes_pai, index=None, placeholder='Selecione um cliente-pai'
+st.subheader('Base detalhada')
+st.caption(
+    'A base nao e exibida no painel. Use o download para investigacoes detalhadas.'
 )
 
-if cliente_pai:
-    detalhe = df_filtrado.loc[df_filtrado['cliente_pai'].eq(cliente_pai)].copy()
-    mc_pai = detalhe['metro_carregado'].sum()
-    mp_pai = detalhe['metro_padrao'].sum()
-    ocupacao_pai = mc_pai / mp_pai if mp_pai > 0 else None
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric(
-        'Ocupacao do cliente-pai',
-        f'{ocupacao_pai:.2%}' if ocupacao_pai is not None else 'N/A',
-        delta=f'{ocupacao_pai - meta_ocupacao:.2%} vs. meta' if ocupacao_pai is not None else None
-    )
-    d2.metric('m3 carregados', formatar_numero(mc_pai))
-    d3.metric('Unidades', formatar_inteiro(detalhe['cliente_unidade'].nunique()))
-    d4.metric('Codigos-filhos', formatar_inteiro(detalhe['cod_cliente'].nunique()))
+arquivo_csv = df_filtrado.to_csv(
+    index=False,
+    sep=';',
+    decimal=','
+).encode('utf-8-sig')
 
-    unidades = preparar_visao_ocupacao(detalhe, 'cliente_unidade')
-    figura_unidades = criar_grafico_ocupacao(
-        unidades, 'cliente_unidade', 'Cliente / unidade', meta_ocupacao,
-        min(30, max(5, len(unidades)))
-    )
-    if figura_unidades is not None:
-        st.plotly_chart(figura_unidades, width='stretch')
-
-    codigos = (
-        detalhe.groupby(['cod_cliente', 'cliente_unidade'], dropna=False)
-        .agg(
-            metro_carregado=('metro_carregado', 'sum'),
-            metro_padrao=('metro_padrao', 'sum'),
-            frete_total=('frete_total', 'sum')
-        ).reset_index()
-    )
-    codigos = codigos.loc[codigos['metro_padrao'].gt(0)].copy()
-    codigos['ocupacao'] = codigos['metro_carregado'] / codigos['metro_padrao']
-    codigos['situacao'] = codigos['ocupacao'].ge(meta_ocupacao).map({True: 'Na meta', False: 'Abaixo da meta'})
-    st.markdown('### Codigos-filhos')
-    st.dataframe(codigos.sort_values('metro_carregado', ascending=False), width='stretch', hide_index=True)
-
-st.divider()
-st.subheader('Tabela de dados filtrados')
-colunas = [
-    'cliente_unidade', 'cod_cliente', 'cliente_pai', 'visao', 'mes_nome',
-    'cd_origem', 'regiao', 'territorio', 'canal', 'cidade', 'uf',
-    'perfil_veiculo', 'tipo_carregamento', 'tipo_produto', 'tipo_ordem',
-    'cod_transportadora', 'metro_carregado', 'metro_padrao', 'ocupacao',
-    'frete_total'
-]
-st.dataframe(
-    df_filtrado[colunas].sort_values('metro_padrao', ascending=False),
-    width='stretch', hide_index=True
-)
-
-st.divider()
-arquivo_csv = df_filtrado.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig')
 st.download_button(
-    '📥 Baixar dados filtrados', arquivo_csv,
-    file_name='ocupacao_filtrada.csv', mime='text/csv'
+    '📥 Baixar base detalhada filtrada',
+    arquivo_csv,
+    file_name='ocupacao_detalhada_filtrada.csv',
+    mime='text/csv'
 )
