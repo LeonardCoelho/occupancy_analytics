@@ -130,6 +130,15 @@ def formatar_inteiro(valor):
     return f'{valor:,}'.replace(',', '.')
 
 
+def formatar_pp(valor, casas=2, com_sinal=True):
+    if valor is None or pd.isna(valor):
+        return 'N/A'
+
+    sinal = '+' if com_sinal and valor >= 0 else ''
+    texto = f'{sinal}{valor * 100:.{casas}f}'
+    return texto.replace('.', ',') + ' p.p.'
+
+
 def preparar_visao_ocupacao(dataframe, coluna_agrupamento, volume_minimo=0.0):
     resultado = (
         dataframe.groupby(coluna_agrupamento, dropna=False)
@@ -406,8 +415,8 @@ def criar_heatmap_geografia_perfil(
     escala = [
         [0.0, '#C0392B'],
         [meta, '#C0392B'],
-        [meta, '#2E86DE'],
-        [1.0, '#2E86DE']
+        [meta, '#27AE60'],
+        [1.0, '#27AE60']
     ]
 
     figura = go.Figure(
@@ -528,8 +537,101 @@ def preparar_comparativo_grupo(dataframe, coluna_grupo):
     return comparativo
 
 
-def criar_grafico_clientes_gerencial(dataframe, meta, quantidade):
-    dados = preparar_comparativo_grupo(dataframe, 'cliente_pai')
+def calcular_analise_mix_carregamento(dataframe):
+    base = dataframe.loc[
+        dataframe['tipo_carregamento'].isin(['Paletizado', 'Estivado'])
+        & dataframe['visao'].isin(['Real', 'AA'])
+    ].copy()
+
+    agrupado = (
+        base
+        .groupby(['tipo_carregamento', 'visao'], dropna=False)
+        .agg(
+            metro_carregado=('metro_carregado', 'sum'),
+            metro_padrao=('metro_padrao', 'sum')
+        )
+        .reset_index()
+    )
+
+    agrupado = agrupado.loc[agrupado['metro_padrao'].gt(0)].copy()
+    agrupado['ocupacao'] = (
+        agrupado['metro_carregado'] / agrupado['metro_padrao']
+    )
+    agrupado['participacao_capacidade'] = (
+        agrupado['metro_padrao']
+        / agrupado.groupby('visao')['metro_padrao'].transform('sum')
+    )
+    agrupado['participacao_volume'] = (
+        agrupado['metro_carregado']
+        / agrupado.groupby('visao')['metro_carregado'].transform('sum')
+    )
+
+    comparativo = agrupado.pivot(
+        index='tipo_carregamento',
+        columns='visao',
+        values=[
+            'metro_carregado', 'metro_padrao', 'ocupacao',
+            'participacao_capacidade', 'participacao_volume'
+        ]
+    )
+    comparativo.columns = [
+        f'{metrica}_{str(visao).lower()}'
+        for metrica, visao in comparativo.columns
+    ]
+    comparativo = comparativo.reset_index()
+
+    for coluna in [
+        'metro_carregado_real', 'metro_carregado_aa',
+        'metro_padrao_real', 'metro_padrao_aa',
+        'ocupacao_real', 'ocupacao_aa',
+        'participacao_capacidade_real', 'participacao_capacidade_aa',
+        'participacao_volume_real', 'participacao_volume_aa'
+    ]:
+        if coluna not in comparativo.columns:
+            comparativo[coluna] = pd.NA
+
+    comparativo['variacao_ocupacao_pp'] = (
+        comparativo['ocupacao_real'] - comparativo['ocupacao_aa']
+    )
+    comparativo['variacao_participacao_pp'] = (
+        comparativo['participacao_capacidade_real']
+        - comparativo['participacao_capacidade_aa']
+    )
+    comparativo['variacao_volume_pct'] = (
+        comparativo['metro_carregado_real']
+        / comparativo['metro_carregado_aa']
+        - 1
+    )
+
+    ocupacao_real_observada = (
+        (comparativo['ocupacao_real']
+         * comparativo['participacao_capacidade_real'])
+        .sum(min_count=1)
+    )
+    ocupacao_simulada_mix_aa = (
+        (comparativo['ocupacao_real']
+         * comparativo['participacao_capacidade_aa'])
+        .sum(min_count=1)
+    )
+    impacto_mix_pp = (
+        ocupacao_real_observada - ocupacao_simulada_mix_aa
+        if pd.notna(ocupacao_real_observada)
+        and pd.notna(ocupacao_simulada_mix_aa)
+        else None
+    )
+
+    return {
+        'detalhe': comparativo,
+        'ocupacao_real_observada': ocupacao_real_observada,
+        'ocupacao_simulada_mix_aa': ocupacao_simulada_mix_aa,
+        'impacto_mix_pp': impacto_mix_pp
+    }
+
+
+def criar_grafico_prioridades_gerencial(
+    dataframe, meta, quantidade, coluna_grupo, titulo_grupo
+):
+    dados = preparar_comparativo_grupo(dataframe, coluna_grupo)
     dados = dados.loc[
         dados['metro_carregado_real'].notna()
         & dados['ocupacao_real'].notna()
@@ -580,7 +682,7 @@ def criar_grafico_clientes_gerencial(dataframe, meta, quantidade):
     figura.add_trace(go.Bar(
         x=comprimento_volume,
         base=[inicio_volume] * len(dados),
-        y=dados['cliente_pai'],
+        y=dados[coluna_grupo],
         orientation='h',
         name='Volume relativo',
         marker_color='#7F8C8D',
@@ -603,7 +705,7 @@ def criar_grafico_clientes_gerencial(dataframe, meta, quantidade):
     figura.add_trace(go.Bar(
         x=comprimento_ocupacao,
         base=inicio_ocupacao,
-        y=dados['cliente_pai'],
+        y=dados[coluna_grupo],
         orientation='h',
         name='Ocupacao Real',
         marker_color=dados['cor_ocupacao'],
@@ -661,7 +763,7 @@ def criar_grafico_clientes_gerencial(dataframe, meta, quantidade):
             'showgrid': True,
             'zeroline': False
         },
-        yaxis={'title': 'Cliente-pai', 'automargin': True},
+        yaxis={'title': titulo_grupo, 'automargin': True},
         hovermode='closest'
     )
 
@@ -871,13 +973,68 @@ st.sidebar.header('Filtros principais')
 st.sidebar.caption('Comparacao automatica: Real x AA')
 
 meses = (
-    df[['mes_numero', 'mes_nome']].drop_duplicates().dropna()
-    .sort_values('mes_numero').reset_index(drop=True)
+    df[['mes_numero', 'mes_nome']]
+    .drop_duplicates()
+    .dropna()
+    .sort_values('mes_numero')
+    .reset_index(drop=True)
 )
 mapa_meses = dict(zip(meses['mes_nome'], meses['mes_numero']))
-nomes_meses = meses['mes_nome'].tolist()
-meses_selecionados = st.sidebar.multiselect('Mes:', nomes_meses, default=nomes_meses)
-numeros_meses = [mapa_meses[mes] for mes in meses_selecionados]
+mapa_numeros_meses = dict(zip(meses['mes_numero'], meses['mes_nome']))
+
+meses_real_disponiveis = (
+    df.loc[df['visao'].eq('Real'), 'mes_numero']
+    .dropna()
+    .astype(int)
+)
+
+if meses_real_disponiveis.empty:
+    st.error('Nao existem meses disponiveis na visao Real.')
+    st.stop()
+
+ultimo_mes_real = int(meses_real_disponiveis.max())
+nome_ultimo_mes_real = mapa_numeros_meses.get(
+    ultimo_mes_real,
+    str(ultimo_mes_real)
+)
+
+modo_periodo = st.sidebar.radio(
+    'Periodo de comparacao:',
+    options=[
+        'Acumulado ate o ultimo mes Real',
+        'Mes especifico'
+    ],
+    index=0,
+    key='modo_periodo_comparavel'
+)
+
+if modo_periodo == 'Acumulado ate o ultimo mes Real':
+    numeros_meses = list(range(1, ultimo_mes_real + 1))
+    meses_selecionados = [
+        mapa_numeros_meses[numero]
+        for numero in numeros_meses
+        if numero in mapa_numeros_meses
+    ]
+    st.sidebar.info(
+        f'Real x AA: janeiro ate {nome_ultimo_mes_real}.'
+    )
+else:
+    meses_real_nomes = [
+        mapa_numeros_meses[numero]
+        for numero in sorted(meses_real_disponiveis.unique())
+        if numero in mapa_numeros_meses
+    ]
+    mes_especifico = st.sidebar.selectbox(
+        'Mes comparavel:',
+        options=meses_real_nomes,
+        index=len(meses_real_nomes) - 1,
+        key='mes_especifico_comparavel'
+    )
+    numeros_meses = [int(mapa_meses[mes_especifico])]
+    meses_selecionados = [mes_especifico]
+    st.sidebar.info(
+        f'Real x AA: {mes_especifico}.'
+    )
 
 cds = valores_disponiveis(df, 'cd_origem')
 cds_selecionados = st.sidebar.multiselect('CD de origem:', cds, default=cds)
@@ -968,7 +1125,7 @@ try:
     geojson = carregar_geojson_brasil(ARQUIVO_GEOJSON)
     escala = [
         [0.0, '#C0392B'], [meta_ocupacao, '#C0392B'],
-        [meta_ocupacao, '#2E86DE'], [1.0, '#2E86DE']
+        [meta_ocupacao, '#27AE60'], [1.0, '#27AE60']
     ]
     figura_mapa = px.choropleth(
         df_mapa, geojson=geojson, locations='uf', featureidkey='id',
@@ -1089,7 +1246,7 @@ c1.metric(
     'Ocupacao Real',
     f'{ocupacao_real:.2%}' if ocupacao_real is not None else 'N/A',
     delta=(
-        f'{ocupacao_real - meta_ocupacao:+.2%} vs. meta'
+        f'{formatar_pp(ocupacao_real - meta_ocupacao)} vs. meta'
         if ocupacao_real is not None else None
     )
 )
@@ -1098,7 +1255,7 @@ c3.metric(
     'Ocupacao AA',
     f'{ocupacao_aa:.2%}' if ocupacao_aa is not None else 'N/A',
     delta=(
-        f'{variacao_ocupacao_pp:+.2%} Real x AA'
+        f'{formatar_pp(variacao_ocupacao_pp)} Real x AA'
         if variacao_ocupacao_pp is not None else None
     )
 )
@@ -1117,54 +1274,150 @@ st.caption(
 )
 
 st.divider()
-st.subheader('Volume e ocupacao por tipo de carregamento')
+st.subheader('Impacto do mix Paletizado x Estivado')
 st.caption(
-    'Mostra se Paletizado e Estivado cresceram ou cairam no Real em relacao ao AA.'
+    'Compara volume, ocupacao e representatividade no mesmo periodo de Real e AA. '
+    'A simulacao estima qual seria a ocupacao Real mantendo a eficiencia atual, '
+    'mas usando o mix de capacidade do AA.'
 )
 
-comparativo_tipo = preparar_comparativo_grupo(
-    df_filtrado,
-    'tipo_carregamento'
+analise_mix = calcular_analise_mix_carregamento(df_filtrado)
+comparativo_mix = analise_mix['detalhe']
+
+mix_col1, mix_col2, mix_col3 = st.columns(3)
+
+mix_col1.metric(
+    'Ocupacao Real observada',
+    (
+        f"{analise_mix['ocupacao_real_observada']:.2%}"
+        if pd.notna(analise_mix['ocupacao_real_observada'])
+        else 'N/A'
+    )
 )
+
+mix_col2.metric(
+    'Ocupacao com mix do AA',
+    (
+        f"{analise_mix['ocupacao_simulada_mix_aa']:.2%}"
+        if pd.notna(analise_mix['ocupacao_simulada_mix_aa'])
+        else 'N/A'
+    )
+)
+
+impacto_mix = analise_mix['impacto_mix_pp']
+
+if impacto_mix is None or pd.isna(impacto_mix):
+    mix_col3.metric('Impacto estimado do mix', 'N/A')
+else:
+    impacto_positivo = impacto_mix >= 0
+    impacto_cor = '#27AE60' if impacto_positivo else '#D9534F'
+    impacto_fundo = (
+        'rgba(39, 174, 96, 0.12)'
+        if impacto_positivo
+        else 'rgba(217, 83, 79, 0.12)'
+    )
+    impacto_icone = '▲' if impacto_positivo else '▼'
+    impacto_texto = (
+        'Mix atual favoreceu a ocupacao'
+        if impacto_positivo
+        else 'Mix atual prejudicou a ocupacao'
+    )
+
+    mix_col3.markdown(
+        f"""
+        <div style="
+            padding: 14px 16px;
+            border-radius: 10px;
+            border: 1px solid {impacto_cor};
+            background-color: {impacto_fundo};
+            min-height: 128px;
+        ">
+            <div style="font-size: 14px; opacity: 0.75; margin-bottom: 6px;">
+                Impacto estimado do mix
+            </div>
+            <div style="
+                font-size: 30px;
+                font-weight: 700;
+                line-height: 1.2;
+                color: {impacto_cor};
+            ">
+                {formatar_pp(impacto_mix)}
+            </div>
+            <div style="
+                margin-top: 8px;
+                font-size: 14px;
+                font-weight: 600;
+                color: {impacto_cor};
+            ">
+                {impacto_icone} {impacto_texto}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 for tipo in ['Paletizado', 'Estivado']:
-    linha = comparativo_tipo.loc[
-        comparativo_tipo['tipo_carregamento'].eq(tipo)
+    linha = comparativo_mix.loc[
+        comparativo_mix['tipo_carregamento'].eq(tipo)
     ]
 
     if linha.empty:
-        st.info(f'Sem dados para {tipo} nos filtros atuais.')
+        st.info(f'Sem dados para {tipo} no periodo comparavel.')
         continue
 
     registro = linha.iloc[0]
-    volume_real = registro['metro_carregado_real']
-    volume_aa = registro['metro_carregado_aa']
-    ocup_tipo_real = registro['ocupacao_real']
-    var_volume = registro['variacao_volume_pct']
-    var_ocup = registro['variacao_ocupacao_pp']
-
     st.markdown(f'### {tipo}')
     t1, t2, t3, t4 = st.columns(4)
-    t1.metric('Volume Real', formatar_numero(volume_real))
+
+    t1.metric(
+        'Representatividade Real',
+        f"{registro['participacao_capacidade_real']:.1%}",
+        delta=(
+            f"{formatar_pp(registro['variacao_participacao_pp'], 1)} vs. AA"
+            if pd.notna(registro['variacao_participacao_pp'])
+            else None
+        )
+    )
     t2.metric(
-        'Volume AA',
-        formatar_numero(volume_aa) if pd.notna(volume_aa) else 'N/A'
+        'Ocupacao Real',
+        f"{registro['ocupacao_real']:.2%}",
+        delta=(
+            f"{formatar_pp(registro['variacao_ocupacao_pp'])} vs. AA"
+            if pd.notna(registro['variacao_ocupacao_pp'])
+            else None
+        )
     )
     t3.metric(
-        'Variacao do volume',
-        f'{var_volume:+.1%}' if pd.notna(var_volume) else 'N/A',
+        'Volume Real',
+        formatar_numero(registro['metro_carregado_real']),
         delta=(
-            f'{formatar_numero(volume_real - volume_aa)} m3'
-            if pd.notna(volume_aa) else None
+            f"{registro['variacao_volume_pct']:+.1%} vs. AA"
+            if pd.notna(registro['variacao_volume_pct'])
+            else None
         )
     )
     t4.metric(
-        'Ocupacao Real',
-        f'{ocup_tipo_real:.2%}' if pd.notna(ocup_tipo_real) else 'N/A',
-        delta=(
-            f'{var_ocup:+.2%} vs. AA'
-            if pd.notna(var_ocup) else None
+        'Representatividade AA',
+        (
+            f"{registro['participacao_capacidade_aa']:.1%}"
+            if pd.notna(registro['participacao_capacidade_aa'])
+            else 'N/A'
         )
+    )
+
+if impacto_mix is not None:
+    tipo_maior_aumento = (
+        comparativo_mix
+        .sort_values('variacao_participacao_pp', ascending=False)
+        .iloc[0]
+    )
+    direcao = 'aumentou' if tipo_maior_aumento['variacao_participacao_pp'] >= 0 else 'caiu'
+    efeito = 'favoreceu' if impacto_mix >= 0 else 'reduziu'
+    st.info(
+        f"A representatividade de {tipo_maior_aumento['tipo_carregamento']} "
+        f"{direcao} {formatar_pp(abs(tipo_maior_aumento['variacao_participacao_pp']), 1, False)} "
+        f"contra AA. Mantidas as ocupacoes atuais, a mudanca de mix {efeito} "
+        f"a ocupacao consolidada em aproximadamente {formatar_pp(abs(impacto_mix), 2, False)}."
     )
 
 st.divider()
@@ -1176,27 +1429,49 @@ st.caption(
     'entre as barras e indicam prioridade. A comparacao com AA fica no hover.'
 )
 
-quantidade_clientes = st.slider(
-    'Quantidade de clientes:',
+col_dimensao_prioridade, col_quantidade_prioridade = st.columns(2)
+
+dimensoes_prioridade = {
+    'Cliente-pai': 'cliente_pai',
+    'UF': 'uf'
+}
+
+dimensao_prioridade = col_dimensao_prioridade.selectbox(
+    'Analisar prioridades por:',
+    options=list(dimensoes_prioridade.keys()),
+    index=0,
+    key='dimensao_prioridades'
+)
+
+quantidade_prioridades = col_quantidade_prioridade.slider(
+    'Quantidade exibida:',
     min_value=5,
     max_value=30,
     value=15,
-    step=5
+    step=5,
+    key='quantidade_prioridades'
 )
 
-figura_clientes = criar_grafico_clientes_gerencial(
+coluna_prioridade = dimensoes_prioridade[dimensao_prioridade]
+
+figura_prioridades = criar_grafico_prioridades_gerencial(
     df_filtrado,
     meta_ocupacao,
-    quantidade_clientes
+    quantidade_prioridades,
+    coluna_prioridade,
+    dimensao_prioridade
 )
 
-if figura_clientes is None:
-    st.warning('Nenhum cliente encontrado para os filtros atuais.')
+if figura_prioridades is None:
+    st.warning(
+        f'Nenhum agrupamento por {dimensao_prioridade} encontrado '
+        'para os filtros atuais.'
+    )
 else:
     st.plotly_chart(
-        figura_clientes,
+        figura_prioridades,
         width='stretch',
-        key='clientes_gerencial'
+        key='prioridades_gerencial'
     )
 
 st.divider()
@@ -1221,28 +1496,7 @@ else:
     )
 
 st.divider()
-st.subheader('Maiores oportunidades para atingir a meta')
-st.caption(
-    'Ranking estimado de quantos m3 adicionais seriam necessarios para cada '
-    'cliente atingir a meta configurada, considerando o m3 padrao do Real.'
-)
 
-figura_gap = criar_grafico_gap_meta(
-    df_filtrado,
-    meta_ocupacao,
-    quantidade=10
-)
-
-if figura_gap is None:
-    st.success('Nenhum cliente com gap positivo para a meta nos filtros atuais.')
-else:
-    st.plotly_chart(
-        figura_gap,
-        width='stretch',
-        key='gap_meta_clientes'
-    )
-
-st.divider()
 st.subheader('Base detalhada')
 st.caption(
     'A base nao e exibida no painel. Use o download para investigacoes detalhadas.'
