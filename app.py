@@ -1367,9 +1367,11 @@ for tipo in ['Paletizado', 'Estivado']:
 
     registro = linha.iloc[0]
     st.markdown(f'### {tipo}')
-    t1, t2, t3, t4 = st.columns(4)
 
-    t1.metric(
+    # Real e AA da mesma metrica ficam lado a lado.
+    rep_real, rep_aa, ocup_real, ocup_aa, volume_real = st.columns(5)
+
+    rep_real.metric(
         'Representatividade Real',
         f"{registro['participacao_capacidade_real']:.1%}",
         delta=(
@@ -1378,7 +1380,15 @@ for tipo in ['Paletizado', 'Estivado']:
             else None
         )
     )
-    t2.metric(
+
+    rep_aa.metric(
+        'Representatividade AA',
+        f"{registro['participacao_capacidade_aa']:.1%}"
+        if pd.notna(registro['participacao_capacidade_aa'])
+        else 'N/A'
+    )
+
+    ocup_real.metric(
         'Ocupacao Real',
         f"{registro['ocupacao_real']:.2%}",
         delta=(
@@ -1387,21 +1397,21 @@ for tipo in ['Paletizado', 'Estivado']:
             else None
         )
     )
-    t3.metric(
+
+    ocup_aa.metric(
+        'Ocupacao AA',
+        f"{registro['ocupacao_aa']:.2%}"
+        if pd.notna(registro['ocupacao_aa'])
+        else 'N/A'
+    )
+
+    volume_real.metric(
         'Volume Real',
         formatar_numero(registro['metro_carregado_real']),
         delta=(
             f"{registro['variacao_volume_pct']:+.1%} vs. AA"
             if pd.notna(registro['variacao_volume_pct'])
             else None
-        )
-    )
-    t4.metric(
-        'Representatividade AA',
-        (
-            f"{registro['participacao_capacidade_aa']:.1%}"
-            if pd.notna(registro['participacao_capacidade_aa'])
-            else 'N/A'
         )
     )
 
