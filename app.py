@@ -13,6 +13,20 @@ st.set_page_config(
     layout='wide'
 )
 
+
+st.markdown(
+    """
+    <style>
+    h1 {font-size: 2.15rem !important;}
+    h2 {font-size: 1.65rem !important;}
+    h3 {font-size: 1.28rem !important;}
+    div[data-testid="stMetricValue"] {font-size: 1.75rem;}
+    div[data-testid="stMetricLabel"] {font-size: 0.95rem;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 PASTA_APP = Path(__file__).resolve().parent
 if (PASTA_APP / 'data').exists():
     BASE_DIR = PASTA_APP
@@ -23,6 +37,10 @@ else:
     st.stop()
 
 ARQUIVO_ANALITICO = BASE_DIR / 'data' / 'processed' / 'ocupacao_analitica.parquet'
+ARQUIVO_CARGAS = BASE_DIR / 'data' / 'processed' / 'ocupacao_cargas.parquet'
+ARQUIVO_PARTICULARIDADES = (
+    BASE_DIR / 'data' / 'processed' / 'particularidades_clientes.parquet'
+)
 ARQUIVO_GEOJSON = BASE_DIR / 'data' / 'geo' / 'br_states.json'
 URL_GEOJSON = (
     'https://raw.githubusercontent.com/giuliano-macedo/'
@@ -959,6 +977,16 @@ if not ARQUIVO_ANALITICO.exists():
 
 
 df = carregar_dados(ARQUIVO_ANALITICO)
+df_cargas = (
+    carregar_dados(ARQUIVO_CARGAS)
+    if ARQUIVO_CARGAS.exists()
+    else pd.DataFrame()
+)
+df_particularidades = (
+    carregar_dados(ARQUIVO_PARTICULARIDADES)
+    if ARQUIVO_PARTICULARIDADES.exists()
+    else pd.DataFrame()
+)
 
 if 'uf_mapa_ativa' not in st.session_state:
     st.session_state['uf_mapa_ativa'] = None
@@ -1039,10 +1067,21 @@ else:
 cds = valores_disponiveis(df, 'cd_origem')
 cds_selecionados = st.sidebar.multiselect('CD de origem:', cds, default=cds)
 
-meta_ocupacao = st.sidebar.number_input(
-    'Meta anual de ocupacao (%)', min_value=0.0, max_value=100.0,
-    value=67.31, step=0.01
-) / 100
+modo_meta = st.sidebar.radio(
+    'Calculo da meta:',
+    options=['Automatica: AA + 0,50 p.p.', 'Manual'],
+    index=0,
+    key='modo_meta'
+)
+meta_manual = None
+if modo_meta == 'Manual':
+    meta_manual = st.sidebar.number_input(
+        'Meta anual de ocupacao (%)',
+        min_value=0.0,
+        max_value=100.0,
+        value=67.31,
+        step=0.01
+    ) / 100
 
 if not meses_selecionados or not cds_selecionados:
     st.warning('Selecione ao menos um mes e um CD.')
@@ -1078,6 +1117,31 @@ with st.sidebar.expander('Filtros adicionais', expanded=False):
 
 
 df_antes_uf = df_filtrado.copy()
+
+base_meta_aa = df_antes_uf.loc[df_antes_uf['visao'].eq('AA')].copy()
+metro_padrao_meta_aa = base_meta_aa['metro_padrao'].sum()
+ocupacao_meta_aa = (
+    base_meta_aa['metro_carregado'].sum() / metro_padrao_meta_aa
+    if metro_padrao_meta_aa > 0
+    else None
+)
+
+if modo_meta.startswith('Automatica') and ocupacao_meta_aa is not None:
+    meta_ocupacao = min(ocupacao_meta_aa + 0.005, 1.0)
+elif meta_manual is not None:
+    meta_ocupacao = meta_manual
+else:
+    meta_ocupacao = 0.6731
+
+st.sidebar.metric(
+    'Meta aplicada',
+    f'{meta_ocupacao:.2%}',
+    delta=(
+        'AA + 0,50 p.p.'
+        if modo_meta.startswith('Automatica') and ocupacao_meta_aa is not None
+        else 'Definida manualmente'
+    )
+)
 
 st.divider()
 st.subheader('Ocupacao por estado')
@@ -1430,6 +1494,45 @@ if impacto_mix is not None:
         f"a ocupacao consolidada em aproximadamente {formatar_pp(abs(impacto_mix), 2, False)}."
     )
 
+
+st.divider()
+st.subheader('Bridge da variacao de ocupacao')
+st.caption(
+    'A ponte reconcilia a ocupacao AA com a ocupacao Real. O efeito de mix e '
+    'calculado por Paletizado x Estivado; o saldo representa eficiencia e '
+    'mudancas de carteira ainda nao explicadas pelas flags operacionais.'
+)
+
+if ocupacao_aa is not None and ocupacao_real is not None and impacto_mix is not None:
+    variacao_total_bridge = ocupacao_real - ocupacao_aa
+    efeito_eficiencia_carteira = variacao_total_bridge - impacto_mix
+    figura_bridge = go.Figure(go.Waterfall(
+        orientation='v',
+        measure=['absolute', 'relative', 'relative', 'total'],
+        x=['Ocupacao AA', 'Mix carregamento', 'Eficiencia / carteira', 'Ocupacao Real'],
+        y=[ocupacao_aa, impacto_mix, efeito_eficiencia_carteira, ocupacao_real],
+        text=[
+            f'{ocupacao_aa:.2%}',
+            formatar_pp(impacto_mix),
+            formatar_pp(efeito_eficiencia_carteira),
+            f'{ocupacao_real:.2%}'
+        ],
+        textposition='outside',
+        connector={'line': {'color': '#7F8C8D'}},
+        increasing={'marker': {'color': '#27AE60'}},
+        decreasing={'marker': {'color': '#D9534F'}},
+        totals={'marker': {'color': '#2980B9'}}
+    ))
+    figura_bridge.update_layout(
+        height=420,
+        margin={'l': 30, 'r': 30, 't': 35, 'b': 50},
+        yaxis={'title': 'Ocupacao', 'tickformat': '.0%'},
+        showlegend=False
+    )
+    st.plotly_chart(figura_bridge, width='stretch', key='bridge_ocupacao')
+else:
+    st.info('Bridge indisponivel para os filtros atuais.')
+
 st.divider()
 st.subheader('Clientes prioritarios para atuacao')
 st.caption(
@@ -1483,6 +1586,234 @@ else:
         width='stretch',
         key='prioridades_gerencial'
     )
+
+
+st.divider()
+st.subheader('Diagnostico de cliente-pai, codigos-filhos e cargas')
+st.caption(
+    'Selecione um cliente-pai para identificar quais codigos-filhos e cargas '
+    'explicam o resultado. As flags combinam volume, ocupacao e restricoes '
+    'operacionais cadastradas.'
+)
+
+clientes_pai_diagnostico = valores_disponiveis(df_filtrado, 'cliente_pai')
+if clientes_pai_diagnostico:
+    cliente_pai_diagnostico = st.selectbox(
+        'Cliente-pai para aprofundamento:',
+        options=clientes_pai_diagnostico,
+        key='cliente_pai_diagnostico'
+    )
+    base_pai = df_filtrado.loc[
+        df_filtrado['cliente_pai'].eq(cliente_pai_diagnostico)
+    ].copy()
+    comparativo_filhos = preparar_comparativo_grupo(base_pai, 'cod_cliente')
+    nomes_filhos = (
+        base_pai[['cod_cliente', 'cliente_unidade']]
+        .drop_duplicates('cod_cliente')
+    )
+    comparativo_filhos = comparativo_filhos.merge(
+        nomes_filhos,
+        on='cod_cliente',
+        how='left'
+    )
+    comparativo_filhos['variacao_volume_abs'] = (
+        comparativo_filhos['metro_carregado_real']
+        - comparativo_filhos['metro_carregado_aa']
+    )
+    comparativo_filhos['flag_volume_ocupacao'] = comparativo_filhos.apply(
+        lambda linha: (
+            'Volume cresceu abaixo da meta'
+            if pd.notna(linha['variacao_volume_pct'])
+            and linha['variacao_volume_pct'] > 0
+            and pd.notna(linha['ocupacao_real'])
+            and linha['ocupacao_real'] < meta_ocupacao
+            else 'Ocupacao caiu contra AA'
+            if pd.notna(linha['variacao_ocupacao_pp'])
+            and linha['variacao_ocupacao_pp'] < 0
+            else 'Na meta / sem alerta principal'
+        ),
+        axis=1
+    )
+
+    base_part_pai = pd.DataFrame()
+    if not df_particularidades.empty:
+        filhos_texto = comparativo_filhos['cod_cliente'].astype(str).str.replace('.0', '', regex=False)
+        comparativo_filhos['cod_cliente_texto'] = filhos_texto
+        base_part_pai = df_particularidades.loc[
+            df_particularidades['cod_cliente_filho'].astype(str).isin(filhos_texto)
+        ].copy()
+        flags_operacionais = []
+        for _, linha in base_part_pai.iterrows():
+            flags = []
+            if str(linha.get('paletizado_especial', '')).strip().upper() in ['SIM', 'S']:
+                flags.append('Paletizacao especial')
+            if str(linha.get('aceita_sobreposicao', '')).strip().upper() in ['NAO', 'NÃO', 'N']:
+                flags.append('Nao aceita sobreposicao')
+            compartilhada = str(
+                linha.get('carga_compartilhada', linha.get('aceita_carga_compartilhada_cadastro', ''))
+            ).strip().upper()
+            if compartilhada in ['NAO', 'NÃO', 'N']:
+                flags.append('Nao aceita carga compartilhada')
+            restricao = str(
+                linha.get('restricao_veiculo', linha.get('restricao_veiculo_cadastro', ''))
+            ).strip()
+            if restricao and restricao.upper() not in ['NAN', 'NAO', 'NÃO']:
+                flags.append(f'Restricao de veiculo: {restricao}')
+            flags_operacionais.append(' | '.join(flags) if flags else 'Sem restricao estruturada')
+        base_part_pai['flags_operacionais'] = flags_operacionais
+        comparativo_filhos = comparativo_filhos.merge(
+            base_part_pai[['cod_cliente_filho', 'flags_operacionais']]
+            .rename(columns={'cod_cliente_filho': 'cod_cliente_texto'}),
+            on='cod_cliente_texto',
+            how='left'
+        )
+
+    pai_real = calcular_resumo_visao(base_pai, 'Real')
+    pai_aa = calcular_resumo_visao(base_pai, 'AA')
+    p1, p2, p3, p4, p5 = st.columns(5)
+    p1.metric('Ocupacao Real', f"{pai_real['ocupacao']:.2%}" if pai_real['ocupacao'] is not None else 'N/A')
+    p2.metric('Ocupacao AA', f"{pai_aa['ocupacao']:.2%}" if pai_aa['ocupacao'] is not None else 'N/A')
+    p3.metric('Meta aplicada', f'{meta_ocupacao:.2%}')
+    p4.metric(
+        'Volume Real',
+        formatar_numero(pai_real['metro_carregado']),
+        delta=(
+            f"{pai_real['metro_carregado'] / pai_aa['metro_carregado'] - 1:+.1%} vs. AA"
+            if pai_aa['metro_carregado'] > 0 else None
+        )
+    )
+    p5.metric('Codigos-filhos', formatar_inteiro(comparativo_filhos['cod_cliente'].nunique()))
+
+    dados_filhos = comparativo_filhos.loc[
+        comparativo_filhos['ocupacao_real'].notna()
+    ].copy().sort_values('metro_carregado_real', ascending=True).tail(15)
+    if not dados_filhos.empty:
+        dados_filhos['rotulo'] = (
+            dados_filhos['cod_cliente'].astype(str).str.replace('.0', '', regex=False)
+            + ' - ' + dados_filhos['cliente_unidade'].fillna('')
+        )
+        dados_filhos['cor'] = dados_filhos['ocupacao_real'].ge(meta_ocupacao).map({
+            True: '#27AE60', False: '#D9534F'
+        })
+        figura_filhos = go.Figure(go.Bar(
+            x=dados_filhos['ocupacao_real'],
+            y=dados_filhos['rotulo'],
+            orientation='h',
+            marker_color=dados_filhos['cor'],
+            text=dados_filhos['ocupacao_real'].map(lambda valor: f'{valor:.1%}'),
+            textposition='inside',
+            customdata=dados_filhos[[
+                'metro_carregado_real', 'metro_carregado_aa',
+                'ocupacao_aa', 'variacao_volume_pct'
+            ]].to_numpy(),
+            hovertemplate=(
+                '<b>%{y}</b><br>Ocupacao Real: %{x:.2%}<br>'
+                'Ocupacao AA: %{customdata[2]:.2%}<br>'
+                'Volume Real: %{customdata[0]:,.2f} m3<br>'
+                'Volume AA: %{customdata[1]:,.2f} m3<br>'
+                'Variacao volume: %{customdata[3]:+.1%}<extra></extra>'
+            )
+        ))
+        figura_filhos.add_vline(
+            x=meta_ocupacao,
+            line_dash='dash', line_color='#F1C40F',
+            annotation_text=f'Meta {meta_ocupacao:.2%}'
+        )
+        figura_filhos.update_layout(
+            title='Codigos-filhos por ocupacao Real',
+            height=max(480, len(dados_filhos) * 38),
+            margin={'l': 20, 'r': 30, 't': 55, 'b': 45},
+            xaxis={'tickformat': '.0%', 'range': [0, max(1.0, dados_filhos['ocupacao_real'].max() * 1.1)]},
+            yaxis={'automargin': True}
+        )
+        st.plotly_chart(figura_filhos, width='stretch', key='filhos_ocupacao')
+
+    colunas_diagnostico = [
+        'cod_cliente', 'cliente_unidade', 'ocupacao_real', 'ocupacao_aa',
+        'metro_carregado_real', 'metro_carregado_aa', 'variacao_volume_pct',
+        'flag_volume_ocupacao'
+    ]
+    if 'flags_operacionais' in comparativo_filhos.columns:
+        colunas_diagnostico.append('flags_operacionais')
+    st.dataframe(
+        comparativo_filhos[colunas_diagnostico]
+        .sort_values('metro_carregado_real', ascending=False),
+        width='stretch',
+        hide_index=True,
+        column_config={
+            'ocupacao_real': st.column_config.NumberColumn('Ocupacao Real', format='%.2f%%'),
+            'ocupacao_aa': st.column_config.NumberColumn('Ocupacao AA', format='%.2f%%'),
+            'variacao_volume_pct': st.column_config.NumberColumn('Var. volume', format='%.1f%%')
+        }
+    )
+
+    if not df_cargas.empty:
+        filhos_pai = base_pai['cod_cliente'].astype(str).str.replace('.0', '', regex=False).unique()
+        cargas_pai = df_cargas.loc[
+            df_cargas['mes_numero'].isin(numeros_meses)
+            & df_cargas['cd_origem'].isin(cds_selecionados)
+            & df_cargas['visao'].eq('Real')
+            & df_cargas['cod_cliente'].astype(str).str.replace('.0', '', regex=False).isin(filhos_pai)
+        ].copy()
+        limite_critico = st.slider(
+            'Limite de ocupacao para carga critica:',
+            min_value=0.20, max_value=float(meta_ocupacao),
+            value=min(0.50, float(meta_ocupacao)), step=0.05,
+            format='%.0f%%', key='limite_carga_critica'
+        )
+        cargas_pai['status_carga'] = pd.cut(
+            cargas_pai['ocupacao'],
+            bins=[-float('inf'), limite_critico, meta_ocupacao, float('inf')],
+            labels=['Critica', 'Atencao', 'Adequada'],
+            right=False
+        )
+        cargas_criticas = (
+            cargas_pai.loc[cargas_pai['ocupacao'].lt(limite_critico)]
+            .nsmallest(20, 'ocupacao')
+            .copy()
+        )
+        st.metric('Cargas criticas do cliente-pai', formatar_inteiro(len(cargas_criticas)))
+        if not cargas_criticas.empty:
+            cargas_criticas['rotulo_carga'] = (
+                cargas_criticas['oc'].astype(str)
+                + ' | ' + cargas_criticas['cod_cliente'].astype(str).str.replace('.0', '', regex=False)
+            )
+            figura_cargas = px.bar(
+                cargas_criticas.sort_values('ocupacao', ascending=False),
+                x='ocupacao', y='rotulo_carga', orientation='h',
+                color='tipo_carregamento',
+                text='ocupacao',
+                hover_data=[
+                    'data_oc', 'cliente_unidade', 'perfil_veiculo',
+                    'metro_carregado', 'metro_padrao', 'status_carga'
+                ],
+                title='Cargas com menor ocupacao'
+            )
+            figura_cargas.update_traces(texttemplate='%{text:.1%}', textposition='inside')
+            figura_cargas.add_vline(
+                x=meta_ocupacao, line_dash='dash', line_color='#F1C40F',
+                annotation_text=f'Meta {meta_ocupacao:.2%}'
+            )
+            figura_cargas.update_layout(
+                height=max(480, len(cargas_criticas) * 32),
+                xaxis={'tickformat': '.0%'}, yaxis={'automargin': True}
+            )
+            st.plotly_chart(figura_cargas, width='stretch', key='cargas_criticas')
+
+            with st.expander('Particularidades operacionais do cliente selecionado'):
+                if base_part_pai.empty:
+                    st.info('Nenhuma particularidade cadastrada para os codigos-filhos selecionados.')
+                else:
+                    for _, part in base_part_pai.iterrows():
+                        st.markdown(
+                            f"**{part.get('cod_cliente_filho', '')} - "
+                            f"{part.get('cliente_particularidade', '')}**  \n"
+                            f"Flags: {part.get('flags_operacionais', 'Sem flag')}  \n"
+                            f"Observacoes: {part.get('observacoes_operacionais', '')}  \n"
+                            f"Regra de ouro: {part.get('regra_de_ouro', '')}"
+                        )
+else:
+    st.info('Nenhum cliente-pai disponivel nos filtros atuais.')
 
 st.divider()
 st.subheader('Ocupacao por estado e perfil de veiculo')

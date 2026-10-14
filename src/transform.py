@@ -654,3 +654,13 @@ print(
     f'Base analítica exportada para: '
     f'{arquivo_saida_analitico}'
 )
+# BASES COMPLEMENTARES PARA DIAGNOSTICO
+from diagnostico import gerar_bases_diagnostico
+from config import RAW_DIR
+
+gerar_bases_diagnostico(
+    df_ocupacao=df_ocupacao,
+    raw_dir=RAW_DIR,
+    processed_dir=PROCESSED_DIR,
+    meses=meses
+)
