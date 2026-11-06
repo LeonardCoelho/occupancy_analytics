@@ -63,7 +63,7 @@ def gerar_bases_diagnostico(df_ocupacao, raw_dir, processed_dir, meses):
         13: 'itens_por_palete', 14: 'altura_maxima',
         15: 'aceita_sobreposicao', 16: 'restricao_veiculo_cadastro',
         17: 'janela_entrega', 21: 'aceita_carga_compartilhada_cadastro',
-        22: 'aceita_marcas_juntas', 23: 'observacoes_operacionais',
+        22: 'aceita_negocios_juntos', 23: 'observacoes_operacionais',
         24: 'cd_faturamento', 30: 'agendado', 31: 'tipo_agendamento',
         35: 'particularidade_agendamento', 39: 'aceita_backorder',
         40: 'pedido_expira', 41: 'prazo_expiracao_dias',

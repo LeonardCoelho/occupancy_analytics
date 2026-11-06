@@ -152,7 +152,7 @@ CAMPOS = {
     'restricao_veiculo_cadastro': 'Restrição de veículo', 'aceita_carga_compartilhada_cadastro': 'Aceita carga compartilhada',
     'aceita_sobreposicao': 'Aceita sobreposição', 'paletizado_especial': 'Paletização especial',
     'itens_por_palete': 'Itens por palete', 'altura_maxima': 'Altura máxima do palete',
-    'aceita_marcas_juntas': 'Aceita marcas diferentes no mesmo veículo', 'shelf_life': 'Shelf life',
+    'aceita_negocios_juntos': 'Aceita negócios diferentes no mesmo veículo', 'shelf_life': 'Shelf life',
     'agendado': 'Entrega agendada', 'janela_entrega': 'Janela de entrega',
     'regra_de_ouro': 'Regra de ouro', 'observacoes_operacionais': 'Observações',
 }
