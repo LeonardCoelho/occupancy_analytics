@@ -57,175 +57,100 @@ No dashboard, o indicador é recalculado após cada filtro utilizando os volumes
 
 ## Funcionalidades
 
-- Extração de dados provenientes de arquivos Excel
-- Tratamento e enriquecimento cadastral dos clientes
-- Exclusão de operações fora do escopo da análise
-- Tratamento de valores nulos e denominadores inválidos
-- Persistência dos dados processados em Parquet
-- Comparação entre período Real e ano anterior
-- Consolidação de alterações de código pela unidade logística
-- Dashboard interativo criado com Streamlit
-- Visualizações interativas criadas com Plotly
-- Filtros por período, CD e dimensões operacionais
-- Visão macro por cliente-pai
-- Detalhamento por cliente/unidade
-- Detalhamento por código-filho
-- Identificação de clientes com alto volume abaixo da meta
-- Exportação dos dados filtrados em CSV
-- Geração de relatório auxiliar em Excel
-- Validações automáticas de qualidade dos dados
+- Pipeline Excel → Parquet com validação de totais (m³ carregado, m³ padrão e frete)
+- Comparação Real × AA no mesmo período (acumulado ou mês)
+- Meta automática = ocupação AA do recorte + 0,50 p.p. (ou manual)
+- Bridge do AA ao Real que fecha exatamente no Real
+- Impacto de cada cliente na meta e na variação Real × AA
+- Paletizado × Estivado: efeito da composição, trocas integrais por cliente e quem mudou a representatividade
+- Cargas (OCs) abaixo da ocupação mínima por perfil, com justificativas
+- Efeito do fechamento do mês (cargas após o dia 20)
+- Diagnóstico cliente-pai → código-filho → OC, com particularidades operacionais
+- Mapa clicável por UF e heatmap UF × perfil
+- Evolução mensal Real × AA × meta
+- Exportação da base filtrada
 
-## Dashboard
+## Painel
 
-O dashboard apresenta os seguintes indicadores:
+Os filtros da barra lateral (período, CD, filtros adicionais e meta) valem para todas as páginas.
+Os mesmos filtros são aplicados à base analítica e à base por OC.
 
-- Ocupação ponderada
-- m³ carregados
-- m³ padrão
-- Frete total
-- Quantidade de unidades
-- Quantidade de códigos de cliente
+Fluxo: **estado → resultado → clientes que mais tiram da meta → códigos-filhos → OCs**.
 
-### Visão por cliente-pai
+| Página | Conteúdo |
+|---|---|
+| Resultado | Indicadores, mapa clicável (o estado escolhido filtra todo o painel), bridge meta → Real só com os motivos que afastaram da meta, evolução mensal |
+| Clientes | Volume × ocupação lado a lado, restrições que explicam a ocupação, causa principal e ação sugerida; clique no cliente → códigos-filhos → particularidades → cargas |
+| Cargas e fechamento | Ocupação dia a dia (até o dia 20 × fechamento), OCs abaixo do mínimo com impacto na meta: cliente → código-filho → OCs |
+| Paletizado × Estivado | Efeito da composição, ocupação de cada tipo e clientes que passaram a paletizar ou a estivar mais (% paletizado AA → Real) |
 
-O gráfico principal permite identificar:
+**Regras adicionais**
+- Linhas sem m³ padrão (8 na base atual) ficam fora da ocupação — antes o m³ carregado delas entrava no numerador.
+- A referência do perfil compara o cliente com os **outros** clientes no mesmo tipo de carregamento e veículo.
+- Restrições vêm da planilha de particularidades: não aceita carga compartilhada, veículo limitado, não aceita sobreposição e paletização especial.
 
-- clientes-pai com maior volume carregado;
-- clientes-pai abaixo da meta de ocupação;
-- quantidade de unidades pertencentes ao agrupamento;
-- quantidade de códigos-filhos;
-- volume padrão;
-- frete total.
+**Causa principal do cliente** (`calculos.diagnostico_clientes`): o impacto na meta é separado em
+*perfil de carga* (o tipo de carregamento e o veículo do cliente, avaliados pela média do painel, ficam abaixo da meta),
+*cargas abaixo do mínimo*, *fechamento do mês* e *carregamento abaixo do padrão* (pior que outros clientes no mesmo tipo e veículo).
+As parcelas somam exatamente o impacto; a mais negativa vira a causa e define a ação sugerida.
 
-As barras representam o volume carregado e os marcadores representam a ocupação ponderada.
+## Regras de cálculo
 
-A classificação visual utiliza:
+Todas as regras estão em `src/calculos.py` e cobertas por testes em `tests/`.
 
-```text
-Vermelho: ocupação abaixo da meta
-Azul: ocupação igual ou acima da meta
-```
+**Ocupação** = Σ m³ carregado ÷ Σ m³ padrão (nunca média de percentuais).
 
-### Detalhamento
+**Impacto na meta** de um grupo (cliente, filho, OC) =
+`(m³ carregado − meta × m³ padrão) ÷ m³ padrão total do painel`.
+A soma de todos os grupos é exatamente `Real − meta`.
 
-Após selecionar um cliente-pai, o dashboard apresenta:
+**Contribuição Real × AA** de um grupo =
+`peso_Real × (ocup_Real − Ocup_AA_total) − peso_AA × (ocup_AA − Ocup_AA_total)`,
+com peso = participação no m³ padrão. A soma de todos os grupos é exatamente `Real − AA`.
+Divide-se em *por ocupação* (`peso_Real × (ocup_Real − ocup_AA)`) e *por volume* (resto).
 
-- ocupação consolidada do cliente-pai;
-- diferença em relação à meta;
-- volume carregado;
-- quantidade de unidades;
-- quantidade de códigos-filhos;
-- frete total;
-- gráfico por cliente/unidade;
-- tabela consolidada por código-filho;
-- dados operacionais detalhados.
+**Tipo de carregamento** = `Σ ocup_Real,tipo × (repr_Real,tipo − repr_AA,tipo)`.
+Troca integral: ≥ 95% de um tipo no AA e ≥ 95% do outro no Real; impacto = efeito por ocupação do cliente.
+Clientes mistos não recebem cálculo de troca.
 
-## Filtros disponíveis
+**Cargas abaixo do mínimo**: a ocupação da OC usa a carga inteira (Σ carregado ÷ Σ padrão da OC),
+então uma OC compartilhada por vários clientes não é marcada como crítica só porque cada parte é pequena.
+Déficit = mínimo do perfil × m³ padrão − m³ carregado; perda = −déficit ÷ m³ padrão total.
 
-### Filtros principais
+**Pós-dia 20** = `(carregado_após − ocup_até20 × padrão_após) ÷ m³ padrão total`.
+No bridge entra a versão sem as OCs abaixo do mínimo, para não contar duas vezes.
 
-- Visão
-- Mês
-- CD de origem
+**Bridge** (meta → Real, por que não chegamos): cada barra é quanto a ocupação seria maior se o problema não tivesse acontecido — *tipo de carregamento* (proporção paletizado/estivado do AA), *fechamento do mês* (cargas após o dia 20 com a ocupação das cargas até o dia 20) e *cargas abaixo do mínimo* (cargas até o dia 20 levadas ao mínimo do veículo). Os grupos de OCs não se sobrepõem; motivos que ajudaram não aparecem; *demais efeitos* é o resíduo que fecha no Real.
 
-### Filtros adicionais
-
-- Cliente-pai
-- Cliente/unidade
-- Código do cliente
-- Território
-- Canal
-- Perfil do veículo
-- Tipo de carregamento
-- Tipo de produto
-- Tipo de ordem
-- UF
-
-Quando um filtro adicional fica vazio, o dashboard considera todos os valores daquela dimensão.
-
-## Arquitetura do pipeline
+## Arquitetura
 
 ```text
-Arquivos de origem em Excel
-            ↓
-        extract.py
-            ↓
-   df_ocupacao.parquet
-            ↓
-       transform.py
-            ↓
- ┌───────────────────────────────┐
- ↓                               ↓
-ocupacao_analitica.parquet       ocupacao_por_unidade.parquet
- ↓                               ↓
-Dashboard Streamlit              output.py
-                                 ↓
-                       Relatório auxiliar em Excel
+data/raw/*.xlsx
+      ↓  src/extract.py
+df_ocupacao.parquet
+      ↓  src/transform.py  (+ src/diagnostico.py)
+ocupacao_analitica.parquet   ocupacao_cargas.parquet   particularidades_clientes.parquet
+      ↓
+app.py  →  filtros + contexto  →  app_pages/*.py
+             src/calculos.py (regras)   src/graficos.py (Plotly + formatação)
 ```
-
-## Etapas do processamento
-
-### Extração
-
-O arquivo `src/extract.py` é responsável por:
-
-1. Ler os arquivos de origem;
-2. Remover operações fora do escopo;
-3. Enriquecer a base com informações cadastrais;
-4. Validar registros sem correspondência;
-5. Validar a ocupação geral;
-6. Exportar a base tratada em Parquet.
-
-### Transformação
-
-O arquivo `src/transform.py` é responsável por:
-
-1. Validar o campo de m³ padrão;
-2. Proteger o cálculo contra valores nulos ou inválidos;
-3. Criar as dimensões de período;
-4. Criar a base analítica para filtros;
-5. Consolidar os dados por cliente e visão;
-6. Comparar Real e ano anterior;
-7. Calcular a variação em pontos percentuais;
-8. Classificar as unidades;
-9. Validar os totais processados;
-10. Exportar as bases finais em Parquet.
-
-### Apresentação
-
-O arquivo `app.py` é responsável por:
-
-1. Carregar a base analítica;
-2. Criar os filtros interativos;
-3. Recalcular os indicadores;
-4. Criar a visão macro por cliente-pai;
-5. Permitir o detalhamento por unidade;
-6. Apresentar os códigos-filhos;
-7. Exibir os dados operacionais;
-8. Disponibilizar o download dos dados filtrados.
-
-O arquivo `src/output.py` permanece como uma saída auxiliar para geração do relatório em Excel.
 
 ## Estrutura do projeto
 
 ```text
 occupancy_analytics/
-├── app.py
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── output/
+├── app.py                    # entrada: dados, filtros, navegação
+├── app_pages/                # uma página por tema
 ├── src/
-│   ├── config.py
-│   ├── extract.py
-│   ├── transform.py
-│   └── output.py
-├── requirements.txt
-├── .gitignore
-└── README.md
+│   ├── atualizar_bases.py    # extract + transform em um comando
+│   ├── calculos.py           # regras de negócio (sem Streamlit)
+│   ├── graficos.py           # gráficos e formatação
+│   ├── config.py, extract.py, transform.py, diagnostico.py, output.py
+├── tests/test_calculos.py
+├── scripts/iniciar_painel.bat
+├── .streamlit/config.toml    # porta 8524, acesso pela rede
+└── data/                     # não versionado
 ```
-
-As pastas de dados não são versionadas, pois podem conter informações corporativas.
 
 ## Tecnologias utilizadas
 
@@ -328,28 +253,36 @@ data/raw/
 
 > Os arquivos originais não são disponibilizados neste repositório por conterem dados corporativos.
 
-### 6. Executar a extração
+### 6. Atualizar as bases
 
 ```powershell
-python src/extract.py
+python src/atualizar_bases.py
 ```
 
-### 7. Executar a transformação
+Roda a extração e a transformação em sequência. O painel percebe sozinho que os Parquets mudaram (não precisa limpar cache).
 
-```powershell
-python src/transform.py
-```
-
-### 8. Executar o dashboard
+### 7. Executar o dashboard
 
 ```powershell
 python -m streamlit run app.py
 ```
 
-O Streamlit normalmente abrirá no endereço:
+A porta e o acesso pela rede ficam em `.streamlit/config.toml` (porta 8524). Para manter rodando e reiniciar se cair, use `scripts/iniciar_painel.bat`.
 
-```text
-http://localhost:8501
+### Deixar o painel sempre no ar (PC da operação)
+
+- Link para o time: `http://<nome-do-pc>:8524` (o nome do PC não muda quando o IP muda).
+- A tarefa **Painel Ocupacao** do Agendador de Tarefas roda `scripts/iniciar_painel.bat` escondido ao entrar no Windows
+  e a cada 30 minutos. Se o painel já estiver no ar, ela não faz nada; se o painel cair, o próprio script reinicia.
+- Registro do que acontece: `logs/painel.log`.
+- Suspensão e hibernação do PC desligadas quando na tomada.
+- Depois de um reinício do Windows, o painel volta quando o usuário entra no Windows (a tarefa roda no usuário, sem permissão de administrador).
+- Atualização mensal: trocar os Excel em `data/raw` e rodar `python src/atualizar_bases.py`. Não precisa reiniciar o painel.
+
+### 8. Rodar os testes
+
+```powershell
+python tests/test_calculos.py
 ```
 
 ### 9. Gerar o relatório auxiliar em Excel
@@ -378,42 +311,19 @@ Uma versão pública e executável será disponibilizada futuramente utilizando 
 
 ## Roadmap
 
-- [X] Estruturar o pipeline do projeto
-- [X] Criar processo de extração
-- [X] Criar processo de transformação
-- [X] Persistir dados em Parquet
-- [X] Validar a ocupação ponderada
-- [X] Consolidar mudanças cadastrais pela unidade
-- [X] Criar relatório auxiliar em Excel
-- [X] Criar dashboard em Streamlit
-- [X] Adicionar filtros operacionais
-- [X] Criar visão macro por cliente-pai
-- [X] Criar detalhamento por unidade
-- [X] Criar detalhamento por código-filho
-- [X] Identificar clientes de alto volume abaixo da meta
-- [X] Adicionar exportação dos dados filtrados
-- [ ] Adicionar comparação visual entre Real e ano anterior
-- [ ] Adicionar evolução mensal da ocupação
-- [ ] Criar base específica no nível da ordem
-- [ ] Adicionar testes automatizados
-- [ ] Refatorar o dashboard em módulos
-- [ ] Criar dados sintéticos para demonstração
-- [ ] Adicionar imagens da versão sintética
-- [ ] Publicar demonstração no Streamlit Community Cloud
-
-## Próximas evoluções
-
-As próximas etapas previstas são:
-
-1. Comparação de ocupação entre Real e ano anterior;
-2. Variação em pontos percentuais por cliente-pai;
-3. Evolução mensal da ocupação;
-4. Ranking de maiores quedas e evoluções;
-5. Base detalhada no nível da ordem;
-6. Testes automatizados;
-7. Separação do aplicativo em módulos;
-8. Geração de dados sintéticos;
-9. Publicação de uma demonstração online.
+- [X] Pipeline Excel → Parquet com validações
+- [X] Dashboard em Streamlit com filtros
+- [X] Comparação Real × AA e meta automática
+- [X] Evolução mensal da ocupação
+- [X] Base no nível da OC
+- [X] Bridge AA → Real
+- [X] Impacto por cliente (meta e Real × AA)
+- [X] Paletizado × Estivado por cliente
+- [X] Testes automatizados das regras
+- [X] Dashboard separado em módulos e páginas
+- [ ] Hospedagem 24h com login corporativo
+- [ ] Justificativas em base compartilhada (hoje em CSV local)
+- [ ] Dados sintéticos para versão pública
 
 ## Aprendizados do projeto
 

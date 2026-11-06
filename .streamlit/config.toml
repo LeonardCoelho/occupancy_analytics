@@ -1,0 +1,21 @@
+[server]
+# Acessível na rede corporativa: http://<ip-da-maquina>:8524
+address = "0.0.0.0"
+port = 8524
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2F6DB5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FA"
+textColor = "#1F2A37"
+borderColor = "#DDE3EA"
+showWidgetBorder = true
+baseRadius = "0.6rem"
+font = "sans-serif"
+headingFontWeights = [700, 600, 600, 600, 600, 600]

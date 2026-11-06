@@ -28,3 +28,9 @@ data/output/
 .idea/
 .DS_Store
 Thumbs.db
+# Backups locais e configuracoes geradas pelo painel
+app_backup_*.py
+data/config/
+
+# Logs do painel
+logs/
